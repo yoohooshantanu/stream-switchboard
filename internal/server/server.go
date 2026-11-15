@@ -123,15 +123,23 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 
 		case <-doneCh:
 			// Client finished sending chunks; continue draining remaining events until EVENT_CALL_ENDED
-			for event := range eventCh {
-				if sendErr := stream.Send(event); sendErr != nil {
-					return nil
-				}
-				if event.Type == pb.EventType_EVENT_CALL_ENDED {
-					return nil
+			// while continuously respecting ctx.Done() cancellation
+			for {
+				select {
+				case <-ctx.Done():
+					return status.FromContextError(ctx.Err()).Err()
+				case event, ok := <-eventCh:
+					if !ok {
+						return nil
+					}
+					if sendErr := stream.Send(event); sendErr != nil {
+						return nil
+					}
+					if event.Type == pb.EventType_EVENT_CALL_ENDED {
+						return nil
+					}
 				}
 			}
-			return nil
 		}
 	}
 }

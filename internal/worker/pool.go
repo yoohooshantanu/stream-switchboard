@@ -27,6 +27,7 @@ type AIWorkerPool struct {
 	callChunks   map[string]int32
 	callEvents   map[string]int32
 	callStart    map[string]time.Time
+	lastActivity map[string]time.Time
 	callMu       sync.Mutex
 }
 
@@ -39,13 +40,14 @@ func NewAIWorkerPool(router *router.EventRouter, numWorkers, queueCapacity int) 
 	}
 
 	return &AIWorkerPool{
-		inputQueue: make(chan *WorkerJob, queueCapacity),
-		router:     router,
-		numWorkers: numWorkers,
-		stopCh:     make(chan struct{}),
-		callChunks: make(map[string]int32),
-		callEvents: make(map[string]int32),
-		callStart:  make(map[string]time.Time),
+		inputQueue:   make(chan *WorkerJob, queueCapacity),
+		router:       router,
+		numWorkers:   numWorkers,
+		stopCh:       make(chan struct{}),
+		callChunks:   make(map[string]int32),
+		callEvents:   make(map[string]int32),
+		callStart:    make(map[string]time.Time),
+		lastActivity: make(map[string]time.Time),
 	}
 }
 
@@ -54,7 +56,36 @@ func (p *AIWorkerPool) Start() {
 		p.wg.Add(1)
 		go p.workerLoop(i)
 	}
+	p.wg.Add(1)
+	go p.cleanupLoop()
 	logger.L.Info("ai_worker_pool_started", "workers", p.numWorkers)
+}
+
+func (p *AIWorkerPool) cleanupLoop() {
+	defer p.wg.Done()
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-ticker.C:
+			p.callMu.Lock()
+			now := time.Now()
+			for callID, last := range p.lastActivity {
+				// Evict abandoned calls where client dropped connection without is_final
+				if now.Sub(last) > 15*time.Minute {
+					delete(p.callStart, callID)
+					delete(p.callChunks, callID)
+					delete(p.callEvents, callID)
+					delete(p.lastActivity, callID)
+					logger.L.Debug("evicted_abandoned_call_state", "call_id", callID)
+				}
+			}
+			p.callMu.Unlock()
+		}
+	}
 }
 
 func (p *AIWorkerPool) Submit(job *WorkerJob) bool {
@@ -87,8 +118,10 @@ func (p *AIWorkerPool) processChunk(job *WorkerJob) {
 	chunk := job.Chunk
 
 	p.callMu.Lock()
+	now := time.Now()
+	p.lastActivity[callID] = now
 	if _, ok := p.callStart[callID]; !ok {
-		p.callStart[callID] = time.Now()
+		p.callStart[callID] = now
 	}
 	p.callChunks[callID]++
 	chunkCount := p.callChunks[callID]
@@ -184,6 +217,11 @@ func (p *AIWorkerPool) processChunk(job *WorkerJob) {
 		p.callMu.Lock()
 		dur := time.Since(p.callStart[callID]).Milliseconds()
 		totEvents := p.callEvents[callID]
+		// Clean up completed call state from in-memory tracking maps
+		delete(p.callStart, callID)
+		delete(p.callChunks, callID)
+		delete(p.callEvents, callID)
+		delete(p.lastActivity, callID)
 		p.callMu.Unlock()
 
 		summary := &pb.CallSummary{

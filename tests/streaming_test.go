@@ -217,3 +217,53 @@ func TestBidirectionalStreamCall(t *testing.T) {
 		t.Errorf("expected non-empty transcript in summary")
 	}
 }
+
+func TestStreamCallContextCancellationDuringDrain(t *testing.T) {
+	h := setupTestHarness(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	authCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_test_key_123")
+
+	stream, err := h.client.StreamCall(authCtx)
+	if err != nil {
+		t.Fatalf("failed opening stream: %v", err)
+	}
+
+	// Send initial chunk without is_final
+	err = stream.Send(&pb.AudioChunk{
+		CallId:    "call_cancel_test_01",
+		TenantId:  "tenant_test",
+		Sequence:  1,
+		Data:      []byte("initial_frame"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("failed sending chunk: %v", err)
+	}
+
+	// Close client send half -> triggers server doneCh branch
+	_ = stream.CloseSend()
+
+	// Immediately cancel context while in drain phase
+	cancel()
+
+	// Reading from stream must return non-nil error promptly (context canceled)
+	done := make(chan struct{})
+	go func() {
+		for {
+			_, err := stream.Recv()
+			if err != nil {
+				close(done)
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+		// Succeeded in cleanly terminating
+	case <-time.After(2 * time.Second):
+		t.Fatalf("stream failed to terminate within timeout upon context cancellation")
+	}
+}
