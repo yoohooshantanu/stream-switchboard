@@ -23,6 +23,7 @@ type AIWorkerPool struct {
 	numWorkers   int
 	wg           sync.WaitGroup
 	stopCh       chan struct{}
+	stopOnce     sync.Once
 	eventSeq     uint64
 	callChunks   map[string]int32
 	callEvents   map[string]int32
@@ -114,6 +115,12 @@ func (p *AIWorkerPool) workerLoop(workerID int) {
 }
 
 func (p *AIWorkerPool) processChunk(job *WorkerJob) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.L.Error("worker_chunk_processing_panic_recovered", "call_id", job.CallID, "panic", r)
+		}
+	}()
+
 	callID := job.CallID
 	chunk := job.Chunk
 
@@ -245,12 +252,9 @@ func (p *AIWorkerPool) incCallEvents(callID string) {
 }
 
 func (p *AIWorkerPool) Stop() {
-	select {
-	case <-p.stopCh:
-		return
-	default:
+	p.stopOnce.Do(func() {
 		close(p.stopCh)
-	}
+	})
 	p.wg.Wait()
 	logger.L.Info("ai_worker_pool_stopped")
 }
