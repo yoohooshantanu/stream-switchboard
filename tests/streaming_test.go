@@ -14,9 +14,11 @@ import (
 	"github.com/yoohooshantanu/streambridge/internal/server"
 	"github.com/yoohooshantanu/streambridge/internal/worker"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 )
 
@@ -265,5 +267,39 @@ func TestStreamCallContextCancellationDuringDrain(t *testing.T) {
 		// Succeeded in cleanly terminating
 	case <-time.After(2 * time.Second):
 		t.Fatalf("stream failed to terminate within timeout upon context cancellation")
+	}
+}
+
+func TestStreamCallEmptyCallIDRejection(t *testing.T) {
+	h := setupTestHarness(t)
+
+	authCtx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "sb_test_key_123")
+	stream, err := h.client.StreamCall(authCtx)
+	if err != nil {
+		t.Fatalf("failed opening stream: %v", err)
+	}
+
+	// Send chunk with empty CallId
+	err = stream.Send(&pb.AudioChunk{
+		CallId:    "",
+		TenantId:  "tenant_test",
+		Sequence:  1,
+		Data:      []byte("chunk_data"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("failed sending initial chunk: %v", err)
+	}
+
+	// Receive should fail with codes.InvalidArgument
+	_, recvErr := stream.Recv()
+	if recvErr == nil {
+		t.Fatalf("expected error on empty call_id, got nil")
+	}
+
+	st, ok := status.FromError(recvErr)
+	if !ok || st.Code() != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument error, got: %v", recvErr)
 	}
 }

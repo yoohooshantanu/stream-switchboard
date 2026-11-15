@@ -57,10 +57,12 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 
 	// Track audio ingestion metrics
 	metrics.DefaultMetrics.IncChunk(len(firstChunk.Data))
-	s.pool.Submit(&worker.WorkerJob{
+	if !s.pool.Submit(&worker.WorkerJob{
 		CallID: callID,
 		Chunk:  firstChunk,
-	})
+	}) {
+		return status.Errorf(codes.ResourceExhausted, "worker pool queue saturated")
+	}
 
 	doneCh := make(chan struct{})
 	var closeOnce sync.Once
@@ -86,10 +88,13 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 			}
 
 			metrics.DefaultMetrics.IncChunk(len(chunk.Data))
-			s.pool.Submit(&worker.WorkerJob{
+			if !s.pool.Submit(&worker.WorkerJob{
 				CallID: callID,
 				Chunk:  chunk,
-			})
+			}) {
+				errCh <- status.Errorf(codes.ResourceExhausted, "worker pool queue saturated")
+				return
+			}
 
 			if chunk.IsFinal {
 				return
