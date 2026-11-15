@@ -2,6 +2,7 @@ package interceptor
 
 import (
 	"context"
+	"os"
 	"strings"
 	"time"
 
@@ -19,6 +20,9 @@ const HeaderAPIKey = "x-api-key"
 func ValidateAPIKey(key string) bool {
 	if key == "" {
 		return false
+	}
+	if envKey := os.Getenv("STREAMBRIDGE_API_KEY"); envKey != "" && key == envKey {
+		return true
 	}
 	// Accept standard production format sb_live_* or valid development key
 	if strings.HasPrefix(key, "sb_live_") || key == "sb_test_key_123" {

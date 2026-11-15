@@ -88,10 +88,19 @@ func (r *EventRouter) Publish(callID string, event *pb.CallEvent) {
 	}
 }
 
-// SaveSummary records the aggregated post-call summary
+// SaveSummary records the aggregated post-call summary with bounded capacity protection
 func (r *EventRouter) SaveSummary(summary *pb.CallSummary) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// Enforce maximum stored summaries to prevent memory exhaustion
+	if len(r.summaries) > 10000 {
+		for k := range r.summaries {
+			delete(r.summaries, k)
+			break
+		}
+	}
+
 	r.summaries[summary.CallId] = summary
 }
 

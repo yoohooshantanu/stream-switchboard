@@ -51,12 +51,13 @@ func TestWatchCallFanOut(t *testing.T) {
 		}()
 	}
 
-	// Give watcher subscriptions a brief moment to register
-	time.Sleep(30 * time.Millisecond)
-
-	// Verify EventRouter has 3 active subscribers registered
-	if count := h.router.SubscriberCount(callID); count != numWatchers {
-		t.Fatalf("expected %d active subscribers in router, got %d", numWatchers, count)
+	// Poll until EventRouter has registered all 3 active subscribers
+	subDeadline := time.Now().Add(2 * time.Second)
+	for h.router.SubscriberCount(callID) < numWatchers {
+		if time.Now().After(subDeadline) {
+			t.Fatalf("timed out waiting for %d active subscribers in router, got %d", numWatchers, h.router.SubscriberCount(callID))
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 
 	// 2. Open StreamCall and stream audio frames into the call
