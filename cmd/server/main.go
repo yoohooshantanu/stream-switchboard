@@ -110,8 +110,20 @@ func main() {
 
 	logger.L.Info("shutting_down_streambridge")
 
-	// Gracefully drain active gRPC streams and RPCs
-	grpcServer.GracefulStop()
+	// Gracefully drain active gRPC streams with fallback timeout
+	stopped := make(chan struct{})
+	go func() {
+		grpcServer.GracefulStop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+		logger.L.Info("grpc_server_stopped_gracefully")
+	case <-time.After(5 * time.Second):
+		logger.L.Warn("grpc_server_forced_stop_on_timeout")
+		grpcServer.Stop()
+	}
 
 	// Drain worker queue and stop background pool
 	workerPool.Stop()
