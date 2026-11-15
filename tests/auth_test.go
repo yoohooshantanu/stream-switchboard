@@ -1,0 +1,63 @@
+package tests
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/yoohooshantanu/streambridge/internal/pb"
+	"google.golang.org/grpc/codes"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+)
+
+func TestAuthInterceptorRejections(t *testing.T) {
+	h := setupTestHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// 1. Unary RPC without any metadata headers -> Must be Unauthenticated
+	_, err := h.client.GetCallSummary(ctx, &pb.SummaryRequest{CallId: "any_call"})
+	if err == nil {
+		t.Fatalf("expected Unauthenticated error for request with no metadata")
+	}
+	if st, ok := status.FromError(err); !ok || st.Code() != codes.Unauthenticated {
+		t.Fatalf("expected status Unauthenticated, got: %v", err)
+	}
+
+	// 2. Unary RPC with invalid API key -> Must be Unauthenticated
+	badAuthCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "invalid_random_token")
+	_, err = h.client.GetCallSummary(badAuthCtx, &pb.SummaryRequest{CallId: "any_call"})
+	if err == nil {
+		t.Fatalf("expected Unauthenticated error for invalid api key")
+	}
+	if st, ok := status.FromError(err); !ok || st.Code() != codes.Unauthenticated {
+		t.Fatalf("expected status Unauthenticated, got: %v", err)
+	}
+
+	// 3. Bidirectional Stream without API key -> Must be Unauthenticated
+	stream, err := h.client.StreamCall(ctx)
+	if err == nil {
+		_, recvErr := stream.Recv()
+		if recvErr == nil {
+			t.Fatalf("expected stream to fail due to missing auth")
+		}
+		if st, ok := status.FromError(recvErr); !ok || st.Code() != codes.Unauthenticated {
+			t.Fatalf("expected status Unauthenticated on unauthed stream, got: %v", recvErr)
+		}
+	} else {
+		if st, ok := status.FromError(err); !ok || st.Code() != codes.Unauthenticated {
+			t.Fatalf("expected status Unauthenticated on stream dial, got: %v", err)
+		}
+	}
+
+	// 4. Standard Health Check probe without API key -> Must succeed with SERVING
+	healthResp, err := h.health.Check(ctx, &healthpb.HealthCheckRequest{})
+	if err != nil {
+		t.Fatalf("health check probe failed unexpectedly: %v", err)
+	}
+	if healthResp.Status != healthpb.HealthCheckResponse_SERVING {
+		t.Fatalf("expected health status SERVING, got: %v", healthResp.Status)
+	}
+}

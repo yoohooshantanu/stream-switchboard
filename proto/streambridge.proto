@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package streambridge.v1;
+
+option go_package = "github.com/yoohooshantanu/streambridge/internal/pb";
+
+// StreamBridge manages real-time bidirectional audio event streams and subscriber fan-out.
+service StreamBridge {
+  // StreamCall is a bidirectional streaming RPC:
+  // The client streams AudioChunks into the server; the server streams CallEvents back in real time.
+  rpc StreamCall(stream AudioChunk) returns (stream CallEvent);
+
+  // WatchCall is a server-streaming RPC:
+  // External clients (supervisors, CRMs) subscribe to a live call's real-time events.
+  rpc WatchCall(WatchRequest) returns (stream CallEvent);
+
+  // GetCallSummary returns the aggregated post-call summary.
+  rpc GetCallSummary(SummaryRequest) returns (CallSummary);
+}
+
+// AudioChunk represents a chunk of streamed audio payload with monotonic sequence tracking.
+message AudioChunk {
+  string call_id   = 1;
+  string tenant_id = 2;
+  uint64 sequence  = 3;
+  bytes  data      = 4;
+  bool   is_final  = 5;
+  int64  timestamp = 6;
+}
+
+// EventType categorizes real-time call events emitted by AI workers.
+enum EventType {
+  EVENT_UNKNOWN            = 0;
+  EVENT_TRANSCRIPT_PARTIAL  = 1;
+  EVENT_TRANSCRIPT_FINAL   = 2;
+  EVENT_SENTIMENT          = 3;
+  EVENT_INTENT_DETECTED    = 4;
+  EVENT_CALL_ENDED         = 5;
+}
+
+// CallEvent represents an event emitted downstream to streams and watchers.
+message CallEvent {
+  string    call_id   = 1;
+  EventType type      = 2;
+  string    payload   = 3;
+  uint64    sequence  = 4;
+  int64     timestamp = 5;
+}
+
+// WatchRequest initiates a server-side stream subscription for a live call.
+message WatchRequest {
+  string call_id   = 1;
+  string tenant_id = 2;
+  string api_key   = 3;
+}
+
+// SummaryRequest queries post-call aggregated metrics and transcription.
+message SummaryRequest {
+  string call_id = 1;
+}
+
+// CallSummary contains aggregated analytics for a completed call.
+message CallSummary {
+  string call_id      = 1;
+  string transcript   = 2;
+  string sentiment    = 3;
+  string intent       = 4;
+  int64  duration_ms  = 5;
+  int32  total_chunks = 6;
+  int32  total_events = 7;
+}

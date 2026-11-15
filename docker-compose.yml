@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  streambridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: streambridge
+    ports:
+      - "50051:50051" # gRPC gateway
+      - "8083:8083"   # HTTP healthz & Prometheus metrics
+    environment:
+      - GRPC_PORT=50051
+      - HTTP_PORT=8083
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/streambridge", "-healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
