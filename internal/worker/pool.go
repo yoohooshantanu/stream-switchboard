@@ -13,6 +13,13 @@ import (
 	"github.com/yoohooshantanu/streambridge/internal/router"
 )
 
+const (
+	// MaxPendingChunksPerCall limits out-of-order buffered frames per call to prevent memory exhaustion
+	MaxPendingChunksPerCall = 64
+	// MaxSequenceGap limits the forward gap distance from nextExpectedSeq to detect malformed streams
+	MaxSequenceGap = 128
+)
+
 type WorkerJob struct {
 	CallID string
 	Chunk  *pb.AudioChunk
@@ -168,6 +175,18 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, job *Worker
 
 		// 2. Buffer out-of-order future chunks (including initial gap where seq > 1 arrives first)
 		if chunk.Sequence > sess.nextExpectedSeq {
+			// Reject excessively large sequence gaps (protects against malformed attacks)
+			if chunk.Sequence > sess.nextExpectedSeq+MaxSequenceGap {
+				logger.L.Warn("dropping_chunk_excessive_sequence_gap", "call_id", callID, "seq", chunk.Sequence, "expected", sess.nextExpectedSeq)
+				return
+			}
+
+			// Reject frame if per-call pending buffer is saturated (protects against memory exhaustion)
+			if len(sess.pendingChunks) >= MaxPendingChunksPerCall {
+				logger.L.Warn("dropping_chunk_pending_buffer_saturated", "call_id", callID, "seq", chunk.Sequence, "buffered", len(sess.pendingChunks))
+				return
+			}
+
 			if _, alreadyBuffered := sess.pendingChunks[chunk.Sequence]; alreadyBuffered {
 				logger.L.Debug("ignoring_duplicate_buffered_chunk", "call_id", callID, "seq", chunk.Sequence)
 				return

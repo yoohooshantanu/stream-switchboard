@@ -340,6 +340,19 @@ func TestTenantIsolationCrossTenantAccessBlocked(t *testing.T) {
 		t.Fatalf("tenant A failed sending initial chunk: %v", err)
 	}
 
+	// Wait for call to be registered under tenant A
+	regDeadline := time.Now().Add(2 * time.Second)
+	for {
+		tID, ok := h.router.GetCallTenant(callID)
+		if ok && tID == "tenant_acme_corp" {
+			break
+		}
+		if time.Now().After(regDeadline) {
+			t.Fatalf("timed out waiting for call to be registered under tenant A")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
 	// 2. Tenant B attempts to WatchCall on Tenant A's call -> Must be PermissionDenied!
 	watchStreamB, err := h.client.WatchCall(tenantBCtx, &pb.WatchRequest{
 		CallId:   callID,
@@ -658,5 +671,95 @@ func TestDuplicateSequenceDrop(t *testing.T) {
 	// Must be exactly 4 unique chunks (not 6!)
 	if summary.TotalChunks != 4 {
 		t.Fatalf("expected exactly 4 total chunks after deduplication, got %d", summary.TotalChunks)
+	}
+}
+
+func TestPendingChunksBufferBounds(t *testing.T) {
+	h := setupTestHarness(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	authCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_test_key_123")
+	stream, err := h.client.StreamCall(authCtx)
+	if err != nil {
+		t.Fatalf("failed opening stream: %v", err)
+	}
+
+	callID := "call_bounds_test_03"
+	eventsCh := make(chan *pb.CallEvent, 128)
+
+	go func() {
+		for {
+			event, recvErr := stream.Recv()
+			if recvErr != nil {
+				close(eventsCh)
+				return
+			}
+			eventsCh <- event
+		}
+	}()
+
+	// 1. Send an excessively large forward sequence gap (e.g. sequence 300 when expected is 1)
+	// Must be rejected/dropped by MaxSequenceGap check without crashing or corrupting state
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  300,
+		Data:      []byte("chunk_excessive_gap"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	time.Sleep(10 * time.Millisecond)
+
+	// 2. Flood 70 out-of-order chunks (sequence 2 through 71) while sequence 1 is missing
+	// MaxPendingChunksPerCall = 64, so chunks beyond 64 must be bounded and dropped
+	for seq := uint64(2); seq <= 71; seq++ {
+		_ = stream.Send(&pb.AudioChunk{
+			CallId:    callID,
+			TenantId:  "tenant_test",
+			Sequence:  seq,
+			Data:      []byte("flood_chunk"),
+			IsFinal:   false,
+			Timestamp: time.Now().UnixMilli(),
+		})
+	}
+	time.Sleep(30 * time.Millisecond)
+
+	// 3. Send Sequence 1 (the missing first frame)
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  1,
+		Data:      []byte("chunk_1"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	time.Sleep(30 * time.Millisecond)
+
+	// 4. Send sequence 66 as final frame (contiguous after chunks 1..65)
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  uint64(worker.MaxPendingChunksPerCall + 2),
+		Data:      []byte("final_chunk"),
+		IsFinal:   true,
+		Timestamp: time.Now().UnixMilli(),
+	})
+
+	_ = stream.CloseSend()
+
+	for range eventsCh {
+	}
+
+	summary, err := h.client.GetCallSummary(authCtx, &pb.SummaryRequest{CallId: callID})
+	if err != nil {
+		t.Fatalf("failed retrieving summary: %v", err)
+	}
+
+	// Chunks processed must not exceed 1 (first) + MaxPendingChunksPerCall (64 buffered) + 1 (final) = 66
+	// Chunks 66..71 sent during flood were dropped because buffer was saturated at 64
+	if summary.TotalChunks > int32(worker.MaxPendingChunksPerCall+2) {
+		t.Fatalf("expected bounded chunks <= %d, got %d", worker.MaxPendingChunksPerCall+2, summary.TotalChunks)
 	}
 }
