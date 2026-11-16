@@ -749,7 +749,15 @@ func TestPendingChunksBufferBounds(t *testing.T) {
 
 	_ = stream.CloseSend()
 
-	for range eventsCh {
+	var errorEvents []*pb.CallEvent
+	for ev := range eventsCh {
+		if ev.Type == pb.EventType_EVENT_CALL_ERROR {
+			errorEvents = append(errorEvents, ev)
+		}
+	}
+
+	if len(errorEvents) == 0 {
+		t.Fatalf("expected caller to be notified with EVENT_CALL_ERROR on excessive gap and buffer saturation, got none")
 	}
 
 	summary, err := h.client.GetCallSummary(authCtx, &pb.SummaryRequest{CallId: callID})
@@ -761,5 +769,72 @@ func TestPendingChunksBufferBounds(t *testing.T) {
 	// Chunks 66..71 sent during flood were dropped because buffer was saturated at 64
 	if summary.TotalChunks > int32(worker.MaxPendingChunksPerCall+2) {
 		t.Fatalf("expected bounded chunks <= %d, got %d", worker.MaxPendingChunksPerCall+2, summary.TotalChunks)
+	}
+}
+
+func TestGapTimeoutSessionTermination(t *testing.T) {
+	h := setupTestHarness(t)
+	// Set an aggressive gap timeout for deterministic quick test
+	h.pool.SetGapTimeout(150 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	authCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_test_key_123")
+	stream, err := h.client.StreamCall(authCtx)
+	if err != nil {
+		t.Fatalf("failed opening stream: %v", err)
+	}
+
+	callID := "call_gap_timeout_test_01"
+
+	// 1. Send chunk sequence 1
+	if err := stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  1,
+		Data:      []byte("audio_chunk_1"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("failed sending chunk 1: %v", err)
+	}
+
+	// 2. Send chunk sequence 3 (leaving sequence 2 missing!)
+	if err := stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  3,
+		Data:      []byte("audio_chunk_3"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("failed sending chunk 3: %v", err)
+	}
+
+	// 3. Close sending side; missing chunk 2 never arrives
+	_ = stream.CloseSend()
+
+	// 4. Drain events; caller must receive EVENT_CALL_ERROR and then stream termination with codes.DataLoss
+	var receivedErrorEvent bool
+	var finalStreamErr error
+	for {
+		ev, recvErr := stream.Recv()
+		if recvErr != nil {
+			finalStreamErr = recvErr
+			break
+		}
+		if ev.Type == pb.EventType_EVENT_CALL_ERROR {
+			receivedErrorEvent = true
+		}
+	}
+
+	if !receivedErrorEvent {
+		t.Fatalf("expected caller to receive EVENT_CALL_ERROR for sequence gap timeout")
+	}
+
+	st, ok := status.FromError(finalStreamErr)
+	if !ok || st.Code() != codes.DataLoss {
+		t.Fatalf("expected stream termination with codes.DataLoss, got status %v (err: %v)", st.Code(), finalStreamErr)
 	}
 }

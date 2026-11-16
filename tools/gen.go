@@ -37,6 +37,7 @@ func main() {
 			{Name: strPtr("EVENT_SENTIMENT"), Number: int32Ptr(3)},
 			{Name: strPtr("EVENT_INTENT_DETECTED"), Number: int32Ptr(4)},
 			{Name: strPtr("EVENT_CALL_ENDED"), Number: int32Ptr(5)},
+			{Name: strPtr("EVENT_CALL_ERROR"), Number: int32Ptr(6)},
 		},
 	}
 	fd.EnumType = append(fd.EnumType, enumDesc)
@@ -194,6 +195,7 @@ const (
 	EventType_EVENT_SENTIMENT          EventType = 3
 	EventType_EVENT_INTENT_DETECTED    EventType = 4
 	EventType_EVENT_CALL_ENDED         EventType = 5
+	EventType_EVENT_CALL_ERROR         EventType = 6
 )
 
 var (
@@ -204,6 +206,7 @@ var (
 		3: "EVENT_SENTIMENT",
 		4: "EVENT_INTENT_DETECTED",
 		5: "EVENT_CALL_ENDED",
+		6: "EVENT_CALL_ERROR",
 	}
 	EventType_value = map[string]int32{
 		"EVENT_UNKNOWN":            0,
@@ -212,6 +215,7 @@ var (
 		"EVENT_SENTIMENT":          3,
 		"EVENT_INTENT_DETECTED":    4,
 		"EVENT_CALL_ENDED":         5,
+		"EVENT_CALL_ERROR":         6,
 	}
 )
 

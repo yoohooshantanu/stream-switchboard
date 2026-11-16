@@ -36,6 +36,7 @@ enum EventType {
   EVENT_SENTIMENT          = 3;
   EVENT_INTENT_DETECTED    = 4;
   EVENT_CALL_ENDED         = 5;
+  EVENT_CALL_ERROR         = 6;
 }
 
 // CallEvent represents an event emitted downstream to streams and watchers.

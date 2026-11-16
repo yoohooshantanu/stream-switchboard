@@ -109,6 +109,7 @@ enum EventType {
   EVENT_SENTIMENT          = 3;
   EVENT_INTENT_DETECTED    = 4;
   EVENT_CALL_ENDED         = 5;
+  EVENT_CALL_ERROR         = 6;
 }
 ```
 
@@ -122,12 +123,14 @@ In gRPC Go, calling `stream.Send()` and `stream.Recv()` concurrently on the same
 - **Goroutine B** exclusively reads from the per-call `eventCh` and calls `stream.Send()`.
 - A shared `doneCh` coordination pattern ensures that whenever either half finishes or errors, the counterpart goroutine drains and terminates cleanly without leaking resources.
 
-### 2. Hash-Partitioned Worker Queues & Per-Call Sequence Reassembly
+### 2. Hash-Partitioned Worker Queues & Bounded Sequence Reassembly
 To eliminate lock contention and race conditions during concurrent audio chunk ingestion:
 - Each worker goroutine in `AIWorkerPool` has an independent, non-shared channel (`workerQueues[workerID]`).
 - Audio chunks are deterministically routed to a specific worker using `hash(callID) % numWorkers`.
 - All chunks for a given call are processed by the exact same worker in strict order.
-- In addition, an out-of-order sequence reassembly buffer (`pendingChunks map[uint64]*WorkerJob`) holds any frames that arrive ahead of `nextExpectedSeq`. When preceding frames arrive, the buffer drains in contiguous order, ensuring that finalization events (`EVENT_TRANSCRIPT_FINAL`, `EVENT_CALL_ENDED`) are never triggered prematurely.
+- **Bounded Out-of-Order Sequence Reassembly**: An out-of-order sequence reassembly buffer (`pendingChunks map[uint64]*WorkerJob`) holds any frames that arrive ahead of `nextExpectedSeq`. Frames are capped at `MaxPendingChunksPerCall = 64` and `MaxSequenceGap = 128`.
+- **Explicit Caller Notification**: If an incoming frame exceeds the maximum sequence gap or the buffer is saturated, the frame is dropped and the client is immediately notified via an `EVENT_CALL_ERROR` event.
+- **Deterministic Gap Timeout & Eviction**: If a sequence gap remains stalled without the missing frame arriving, the worker's background ticker aborts the stalled session after `DefaultGapTimeout` (2 seconds), emits an `EVENT_CALL_ERROR` with `sequence_gap_timeout`, terminates the gRPC stream with `codes.DataLoss`, and evicts worker session memory to prevent indefinite hanging or memory leakage.
 
 ### 3. Strict Tenant Isolation & Key Registry
 - Incoming API keys are verified against a strict `KeyRegistry`. Wildcard prefixes (`strings.HasPrefix`) are strictly rejected.

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/yoohooshantanu/streambridge/internal/interceptor"
@@ -144,6 +145,11 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 				return status.Errorf(codes.Unavailable, "failed emitting call event: %v", sendErr)
 			}
 
+			// If unrecoverable gap timeout occurred, terminate stream with DataLoss gRPC status
+			if event.Type == pb.EventType_EVENT_CALL_ERROR && strings.Contains(event.Payload, "sequence_gap_timeout") {
+				return status.Errorf(codes.DataLoss, "stream error: %s", event.Payload)
+			}
+
 			// If call ended event is sent, complete the stream gracefully
 			if event.Type == pb.EventType_EVENT_CALL_ENDED {
 				return nil
@@ -162,6 +168,9 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 					}
 					if sendErr := stream.Send(event); sendErr != nil {
 						return nil
+					}
+					if event.Type == pb.EventType_EVENT_CALL_ERROR && strings.Contains(event.Payload, "sequence_gap_timeout") {
+						return status.Errorf(codes.DataLoss, "stream error: %s", event.Payload)
 					}
 					if event.Type == pb.EventType_EVENT_CALL_ENDED {
 						return nil
@@ -216,7 +225,7 @@ func (s *StreamBridgeServer) WatchCall(req *pb.WatchRequest, stream grpc.ServerS
 				return status.Errorf(codes.Unavailable, "failed sending watch event: %v", err)
 			}
 
-			if event.Type == pb.EventType_EVENT_CALL_ENDED {
+			if event.Type == pb.EventType_EVENT_CALL_ENDED || event.Type == pb.EventType_EVENT_CALL_ERROR {
 				return nil
 			}
 		}

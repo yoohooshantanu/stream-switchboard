@@ -18,6 +18,8 @@ const (
 	MaxPendingChunksPerCall = 64
 	// MaxSequenceGap limits the forward gap distance from nextExpectedSeq to detect malformed streams
 	MaxSequenceGap = 128
+	// DefaultGapTimeout is the maximum duration an out-of-order sequence gap can stall before the session aborts with EVENT_CALL_ERROR
+	DefaultGapTimeout = 2 * time.Second
 )
 
 type WorkerJob struct {
@@ -29,6 +31,7 @@ type callSession struct {
 	callID          string
 	nextExpectedSeq uint64
 	pendingChunks   map[uint64]*WorkerJob
+	gapStartTime    time.Time
 	chunkCount      int32
 	eventCount      int32
 	startTime       time.Time
@@ -43,6 +46,7 @@ type AIWorkerPool struct {
 	stopCh       chan struct{}
 	stopOnce     sync.Once
 	eventSeq     uint64
+	gapTimeout   time.Duration
 }
 
 func hashCallID(callID string, numWorkers int) int {
@@ -77,7 +81,30 @@ func NewAIWorkerPool(router *router.EventRouter, numWorkers, queueCapacity int) 
 		numWorkers:   numWorkers,
 		workerQueues: workerQueues,
 		stopCh:       make(chan struct{}),
+		gapTimeout:   DefaultGapTimeout,
 	}
+}
+
+// SetGapTimeout configures the maximum duration a sequence gap can remain open before aborting
+func (p *AIWorkerPool) SetGapTimeout(d time.Duration) {
+	if d > 0 {
+		p.gapTimeout = d
+	}
+}
+
+func (p *AIWorkerPool) emitCallError(callID, errCode, errMsg string) {
+	payload, _ := json.Marshal(map[string]interface{}{
+		"error":   errCode,
+		"message": errMsg,
+	})
+	seq := atomic.AddUint64(&p.eventSeq, 1)
+	p.router.Publish(callID, &pb.CallEvent{
+		CallId:    callID,
+		Type:      pb.EventType_EVENT_CALL_ERROR,
+		Payload:   string(payload),
+		Sequence:  seq,
+		Timestamp: time.Now().UnixMilli(),
+	})
 }
 
 func (p *AIWorkerPool) Start() {
@@ -110,7 +137,7 @@ func (p *AIWorkerPool) workerLoop(workerID int) {
 	// Each worker goroutine exclusively owns the state for its partitioned callIDs.
 	// No mutex contention across workers!
 	sessions := make(map[string]*callSession)
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	queue := p.workerQueues[workerID]
@@ -121,12 +148,20 @@ func (p *AIWorkerPool) workerLoop(workerID int) {
 			return
 
 		case <-ticker.C:
-			// Evict abandoned sessions with no activity for > 15 minutes
 			now := time.Now()
 			for callID, sess := range sessions {
+				// Evict abandoned sessions with no activity for > 15 minutes
 				if now.Sub(sess.lastActivity) > 15*time.Minute {
 					delete(sessions, callID)
 					logger.L.Debug("evicted_abandoned_session", "call_id", callID, "worker_id", workerID)
+					continue
+				}
+
+				// Sequence gap timeout: if an out-of-order gap stall exceeds gapTimeout, abort with explicit EVENT_CALL_ERROR
+				if len(sess.pendingChunks) > 0 && !sess.gapStartTime.IsZero() && now.Sub(sess.gapStartTime) >= p.gapTimeout {
+					logger.L.Warn("session_sequence_gap_timeout_expired", "call_id", callID, "expected", sess.nextExpectedSeq, "pending", len(sess.pendingChunks), "waited", now.Sub(sess.gapStartTime))
+					p.emitCallError(callID, "sequence_gap_timeout", fmt.Sprintf("stream stalled waiting for frame sequence %d for %v; missing frame never arrived", sess.nextExpectedSeq, p.gapTimeout))
+					delete(sessions, callID)
 				}
 			}
 
@@ -175,21 +210,26 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, job *Worker
 
 		// 2. Buffer out-of-order future chunks (including initial gap where seq > 1 arrives first)
 		if chunk.Sequence > sess.nextExpectedSeq {
-			// Reject excessively large sequence gaps (protects against malformed attacks)
+			// Reject excessively large sequence gaps (protects against malformed attacks) and notify caller
 			if chunk.Sequence > sess.nextExpectedSeq+MaxSequenceGap {
 				logger.L.Warn("dropping_chunk_excessive_sequence_gap", "call_id", callID, "seq", chunk.Sequence, "expected", sess.nextExpectedSeq)
+				p.emitCallError(callID, "excessive_sequence_gap", fmt.Sprintf("chunk sequence %d exceeds max forward gap (%d frames from %d)", chunk.Sequence, MaxSequenceGap, sess.nextExpectedSeq))
 				return
 			}
 
-			// Reject frame if per-call pending buffer is saturated (protects against memory exhaustion)
+			// Reject frame if per-call pending buffer is saturated (protects against memory exhaustion) and notify caller
 			if len(sess.pendingChunks) >= MaxPendingChunksPerCall {
 				logger.L.Warn("dropping_chunk_pending_buffer_saturated", "call_id", callID, "seq", chunk.Sequence, "buffered", len(sess.pendingChunks))
+				p.emitCallError(callID, "pending_buffer_saturated", fmt.Sprintf("pending reassembly buffer saturated (%d frames max)", MaxPendingChunksPerCall))
 				return
 			}
 
 			if _, alreadyBuffered := sess.pendingChunks[chunk.Sequence]; alreadyBuffered {
 				logger.L.Debug("ignoring_duplicate_buffered_chunk", "call_id", callID, "seq", chunk.Sequence)
 				return
+			}
+			if len(sess.pendingChunks) == 0 {
+				sess.gapStartTime = time.Now()
 			}
 			sess.pendingChunks[chunk.Sequence] = job
 			return
@@ -216,6 +256,10 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, job *Worker
 			isFinalEncountered = true
 		}
 		sess.nextExpectedSeq++
+	}
+
+	if len(sess.pendingChunks) == 0 {
+		sess.gapStartTime = time.Time{}
 	}
 
 	// 5. If call completed, remove session from worker state
