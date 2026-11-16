@@ -149,7 +149,7 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, job *Worker
 	if !exists {
 		sess = &callSession{
 			callID:          callID,
-			nextExpectedSeq: chunk.Sequence,
+			nextExpectedSeq: 1, // Standard streams always sequence from 1
 			pendingChunks:   make(map[uint64]*WorkerJob),
 			startTime:       time.Now(),
 			lastActivity:    time.Now(),
@@ -158,22 +158,34 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, job *Worker
 	}
 	sess.lastActivity = time.Now()
 
-	// Sequence Sequencing & Reassembly:
-	// If chunk has sequence > 0 and arrives ahead of expected sequence, buffer it
-	if chunk.Sequence > 0 && sess.nextExpectedSeq > 0 && chunk.Sequence > sess.nextExpectedSeq {
-		sess.pendingChunks[chunk.Sequence] = job
-		return
+	// Handle monotonic sequencing for sequenced frames (Sequence > 0)
+	if chunk.Sequence > 0 {
+		// 1. Drop already-processed duplicate sequence
+		if chunk.Sequence < sess.nextExpectedSeq {
+			logger.L.Debug("ignoring_duplicate_processed_chunk", "call_id", callID, "seq", chunk.Sequence, "expected", sess.nextExpectedSeq)
+			return
+		}
+
+		// 2. Buffer out-of-order future chunks (including initial gap where seq > 1 arrives first)
+		if chunk.Sequence > sess.nextExpectedSeq {
+			if _, alreadyBuffered := sess.pendingChunks[chunk.Sequence]; alreadyBuffered {
+				logger.L.Debug("ignoring_duplicate_buffered_chunk", "call_id", callID, "seq", chunk.Sequence)
+				return
+			}
+			sess.pendingChunks[chunk.Sequence] = job
+			return
+		}
 	}
 
-	// Process current chunk
+	// 3. Process current chunk (matches nextExpectedSeq, or chunk.Sequence == 0)
 	p.executeChunk(sess, chunk)
-	if chunk.Sequence > 0 && chunk.Sequence >= sess.nextExpectedSeq {
+	if chunk.Sequence > 0 {
 		sess.nextExpectedSeq = chunk.Sequence + 1
 	}
 
 	isFinalEncountered := chunk.IsFinal
 
-	// Process any buffered chunks that now match contiguous sequence
+	// 4. Process any buffered chunks that now match contiguous sequence
 	for {
 		nextJob, hasNext := sess.pendingChunks[sess.nextExpectedSeq]
 		if !hasNext {
@@ -187,7 +199,7 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, job *Worker
 		sess.nextExpectedSeq++
 	}
 
-	// If call completed, remove session from worker state
+	// 5. If call completed, remove session from worker state
 	if isFinalEncountered {
 		delete(sessions, callID)
 	}

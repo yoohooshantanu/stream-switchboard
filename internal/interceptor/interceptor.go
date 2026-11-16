@@ -44,14 +44,10 @@ type MemoryKeyRegistry struct {
 	keys map[string]string
 }
 
-// NewKeyRegistry creates a KeyRegistry initialized with default keys and environment overrides
+// NewKeyRegistry creates a production KeyRegistry initialized strictly from configuration or environment
 func NewKeyRegistry() *MemoryKeyRegistry {
 	r := &MemoryKeyRegistry{
-		keys: map[string]string{
-			"sb_test_key_123":         "tenant_test",
-			"sb_live_acme_corp_sec99": "tenant_acme_corp",
-			"sb_live_growth_tier_key": "tenant_growth_tier",
-		},
+		keys: make(map[string]string),
 	}
 
 	// Support explicit STREAMBRIDGE_API_KEY from environment
@@ -92,11 +88,10 @@ func (r *MemoryKeyRegistry) RegisterKey(apiKey, tenantID string) {
 	r.keys[apiKey] = tenantID
 }
 
-// Global registry instance
+// Global registry instance initialized without hardcoded test credentials
 var DefaultRegistry = NewKeyRegistry()
 
-// ValidateAPIKey checks if the incoming API key is registered and returns its bound tenant ID.
-// Prefix-based wildcards are strictly prohibited.
+// ValidateAPIKey checks if the incoming API key is registered in DefaultRegistry
 func ValidateAPIKey(key string) (string, bool) {
 	return DefaultRegistry.LookupTenant(key)
 }
@@ -110,76 +105,94 @@ func (w *wrappedServerStream) Context() context.Context {
 	return w.ctx
 }
 
-// UnaryAuthInterceptor verifies metadata headers on unary RPCs and binds tenant context
-func UnaryAuthInterceptor(
-	ctx context.Context,
-	req interface{},
-	info *grpc.UnaryServerInfo,
-	handler grpc.UnaryHandler,
-) (interface{}, error) {
-	// Skip auth check for standard health probes
-	if strings.HasPrefix(info.FullMethod, "/grpc.health.v1.Health/") {
-		return handler(ctx, req)
+// NewUnaryAuthInterceptor creates a unary auth interceptor using the provided KeyRegistry
+func NewUnaryAuthInterceptor(reg KeyRegistry) grpc.UnaryServerInterceptor {
+	if reg == nil {
+		reg = DefaultRegistry
 	}
 
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		metrics.DefaultMetrics.IncRPC(true)
-		return nil, status.Error(codes.Unauthenticated, "missing request metadata headers")
-	}
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
+		// Skip auth check for standard health probes
+		if strings.HasPrefix(info.FullMethod, "/grpc.health.v1.Health/") {
+			return handler(ctx, req)
+		}
 
-	keys := md.Get(HeaderAPIKey)
-	if len(keys) == 0 {
-		metrics.DefaultMetrics.IncRPC(true)
-		return nil, status.Error(codes.Unauthenticated, "invalid or missing x-api-key header")
-	}
+		md, ok := metadata.FromIncomingContext(ctx)
+		if !ok {
+			metrics.DefaultMetrics.IncRPC(true)
+			return nil, status.Error(codes.Unauthenticated, "missing request metadata headers")
+		}
 
-	tenantID, valid := ValidateAPIKey(keys[0])
-	if !valid {
-		metrics.DefaultMetrics.IncRPC(true)
-		return nil, status.Error(codes.Unauthenticated, "invalid or missing x-api-key header")
-	}
+		keys := md.Get(HeaderAPIKey)
+		if len(keys) == 0 {
+			metrics.DefaultMetrics.IncRPC(true)
+			return nil, status.Error(codes.Unauthenticated, "invalid or missing x-api-key header")
+		}
 
-	authedCtx := ContextWithTenant(ctx, tenantID)
-	return handler(authedCtx, req)
+		tenantID, valid := reg.LookupTenant(keys[0])
+		if !valid {
+			metrics.DefaultMetrics.IncRPC(true)
+			return nil, status.Error(codes.Unauthenticated, "invalid or missing x-api-key header")
+		}
+
+		authedCtx := ContextWithTenant(ctx, tenantID)
+		return handler(authedCtx, req)
+	}
 }
 
-// StreamAuthInterceptor enforces API key authentication before initializing bidirectional or server streams
-func StreamAuthInterceptor(
-	srv interface{},
-	ss grpc.ServerStream,
-	info *grpc.StreamServerInfo,
-	handler grpc.StreamHandler,
-) error {
-	// Skip auth check for health watch
-	if strings.HasPrefix(info.FullMethod, "/grpc.health.v1.Health/") {
-		return handler(srv, ss)
+// NewStreamAuthInterceptor creates a stream auth interceptor using the provided KeyRegistry
+func NewStreamAuthInterceptor(reg KeyRegistry) grpc.StreamServerInterceptor {
+	if reg == nil {
+		reg = DefaultRegistry
 	}
 
-	md, ok := metadata.FromIncomingContext(ss.Context())
-	if !ok {
-		metrics.DefaultMetrics.IncRPC(true)
-		return status.Error(codes.Unauthenticated, "missing request metadata headers")
-	}
+	return func(
+		srv interface{},
+		ss grpc.ServerStream,
+		info *grpc.StreamServerInfo,
+		handler grpc.StreamHandler,
+	) error {
+		// Skip auth check for health watch
+		if strings.HasPrefix(info.FullMethod, "/grpc.health.v1.Health/") {
+			return handler(srv, ss)
+		}
 
-	keys := md.Get(HeaderAPIKey)
-	if len(keys) == 0 {
-		metrics.DefaultMetrics.IncRPC(true)
-		return status.Error(codes.Unauthenticated, "invalid or missing x-api-key header")
-	}
+		md, ok := metadata.FromIncomingContext(ss.Context())
+		if !ok {
+			metrics.DefaultMetrics.IncRPC(true)
+			return status.Error(codes.Unauthenticated, "missing request metadata headers")
+		}
 
-	tenantID, valid := ValidateAPIKey(keys[0])
-	if !valid {
-		metrics.DefaultMetrics.IncRPC(true)
-		return status.Error(codes.Unauthenticated, "invalid or missing x-api-key header")
-	}
+		keys := md.Get(HeaderAPIKey)
+		if len(keys) == 0 {
+			metrics.DefaultMetrics.IncRPC(true)
+			return status.Error(codes.Unauthenticated, "invalid or missing x-api-key header")
+		}
 
-	wrappedStream := &wrappedServerStream{
-		ServerStream: ss,
-		ctx:          ContextWithTenant(ss.Context(), tenantID),
+		tenantID, valid := reg.LookupTenant(keys[0])
+		if !valid {
+			metrics.DefaultMetrics.IncRPC(true)
+			return status.Error(codes.Unauthenticated, "invalid or missing x-api-key header")
+		}
+
+		wrappedStream := &wrappedServerStream{
+			ServerStream: ss,
+			ctx:          ContextWithTenant(ss.Context(), tenantID),
+		}
+		return handler(srv, wrappedStream)
 	}
-	return handler(srv, wrappedStream)
 }
+
+// Default UnaryAuthInterceptor using DefaultRegistry
+var UnaryAuthInterceptor = NewUnaryAuthInterceptor(DefaultRegistry)
+
+// Default StreamAuthInterceptor using DefaultRegistry
+var StreamAuthInterceptor = NewStreamAuthInterceptor(DefaultRegistry)
 
 // UnaryLoggingInterceptor logs method invocation duration and status codes
 func UnaryLoggingInterceptor(

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yoohooshantanu/streambridge/internal/interceptor"
 	"github.com/yoohooshantanu/streambridge/internal/pb"
 	"google.golang.org/grpc/codes"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -37,7 +38,6 @@ func TestAuthInterceptorRejections(t *testing.T) {
 	}
 
 	// 3. Unary RPC with attacker prefix "sb_live_attacker_unauthorized" -> Must be Unauthenticated!
-	// Proves that strings.HasPrefix wildcard backdoor is strictly eliminated.
 	attackerAuthCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_live_attacker_unauthorized")
 	_, err = h.client.GetCallSummary(attackerAuthCtx, &pb.SummaryRequest{CallId: "any_call"})
 	if err == nil {
@@ -70,5 +70,22 @@ func TestAuthInterceptorRejections(t *testing.T) {
 	}
 	if healthResp.Status != healthpb.HealthCheckResponse_SERVING {
 		t.Fatalf("expected health status SERVING, got: %v", healthResp.Status)
+	}
+}
+
+func TestProductionRegistryStartsEmpty(t *testing.T) {
+	// Verify that interceptor.NewKeyRegistry() contains zero hardcoded default credentials
+	reg := interceptor.NewKeyRegistry()
+
+	hardcodedKeys := []string{
+		"sb_test_key_123",
+		"sb_live_acme_corp_sec99",
+		"sb_live_growth_tier_key",
+	}
+
+	for _, k := range hardcodedKeys {
+		if tenant, found := reg.LookupTenant(k); found {
+			t.Fatalf("production registry must not contain hardcoded default credential %q (mapped to %q)", k, tenant)
+		}
 	}
 }

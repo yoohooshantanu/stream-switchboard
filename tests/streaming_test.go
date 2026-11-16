@@ -29,6 +29,7 @@ type testHarness struct {
 	grpcServer *grpc.Server
 	router     *router.EventRouter
 	pool       *worker.AIWorkerPool
+	keyReg     *interceptor.MemoryKeyRegistry
 	client     pb.StreamBridgeClient
 	health     healthpb.HealthClient
 	conn       *grpc.ClientConn
@@ -40,9 +41,14 @@ func setupTestHarness(t *testing.T) *testHarness {
 	pool := worker.NewAIWorkerPool(router, 4, 1024)
 	pool.Start()
 
+	keyReg := interceptor.NewKeyRegistry()
+	keyReg.RegisterKey("sb_test_key_123", "tenant_test")
+	keyReg.RegisterKey("sb_live_acme_corp_sec99", "tenant_acme_corp")
+	keyReg.RegisterKey("sb_live_growth_tier_key", "tenant_growth_tier")
+
 	grpcServer := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(interceptor.UnaryAuthInterceptor),
-		grpc.ChainStreamInterceptor(interceptor.StreamAuthInterceptor),
+		grpc.ChainUnaryInterceptor(interceptor.NewUnaryAuthInterceptor(keyReg)),
+		grpc.ChainStreamInterceptor(interceptor.NewStreamAuthInterceptor(keyReg)),
 	)
 
 	bridgeServer := server.NewStreamBridgeServer(router, pool)
@@ -74,6 +80,7 @@ func setupTestHarness(t *testing.T) *testHarness {
 		grpcServer: grpcServer,
 		router:     router,
 		pool:       pool,
+		keyReg:     keyReg,
 		client:     client,
 		health:     healthClient,
 		conn:       conn,
@@ -426,7 +433,6 @@ func TestOutOfOrderChunkArrivalSequencing(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	// Send Chunk 3 (Sequence 3, IsFinal: true) BEFORE Chunk 2!
-	// AIWorkerPool must buffer Chunk 3 until Chunk 2 arrives, avoiding premature finalization!
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -455,7 +461,6 @@ func TestOutOfOrderChunkArrivalSequencing(t *testing.T) {
 		receivedEvents = append(receivedEvents, ev)
 	}
 
-	// Verify that summary contains all 3 chunks
 	summary, err := h.client.GetCallSummary(authCtx, &pb.SummaryRequest{CallId: callID})
 	if err != nil {
 		t.Fatalf("failed retrieving summary: %v", err)
@@ -465,12 +470,193 @@ func TestOutOfOrderChunkArrivalSequencing(t *testing.T) {
 		t.Fatalf("expected 3 total chunks in summary despite out-of-order arrival, got %d", summary.TotalChunks)
 	}
 
-	// Verify that EVENT_CALL_ENDED occurred strictly at the end of the event stream
 	if len(receivedEvents) == 0 {
 		t.Fatalf("expected events, got 0")
 	}
 	lastEvent := receivedEvents[len(receivedEvents)-1]
 	if lastEvent.Type != pb.EventType_EVENT_CALL_ENDED {
 		t.Fatalf("expected last event to be EVENT_CALL_ENDED, got type %v", lastEvent.Type)
+	}
+}
+
+func TestInitialSequenceGapReassembly(t *testing.T) {
+	h := setupTestHarness(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	authCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_test_key_123")
+	stream, err := h.client.StreamCall(authCtx)
+	if err != nil {
+		t.Fatalf("failed opening stream: %v", err)
+	}
+
+	callID := "call_initial_gap_test_01"
+	eventsCh := make(chan *pb.CallEvent, 32)
+
+	go func() {
+		for {
+			event, recvErr := stream.Recv()
+			if recvErr != nil {
+				close(eventsCh)
+				return
+			}
+			eventsCh <- event
+		}
+	}()
+
+	// 1. Send Sequence 2 FIRST (Stream begins with an initial gap, missing sequence 1!)
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  2,
+		Data:      []byte("chunk_2_received_first"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	// 2. Send Sequence 3 (IsFinal: true)
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  3,
+		Data:      []byte("chunk_3_final_audio"),
+		IsFinal:   true,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	// 3. Send Sequence 1 LAST (Missing first chunk finally arrives)
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  1,
+		Data:      []byte("chunk_1_arrived_last"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+
+	_ = stream.CloseSend()
+
+	// Drain events
+	for range eventsCh {
+	}
+
+	// Verify that summary accurately captured all 3 chunks in order
+	summary, err := h.client.GetCallSummary(authCtx, &pb.SummaryRequest{CallId: callID})
+	if err != nil {
+		t.Fatalf("failed retrieving summary: %v", err)
+	}
+
+	if summary.TotalChunks != 3 {
+		t.Fatalf("expected 3 total chunks after initial gap reassembly, got %d", summary.TotalChunks)
+	}
+}
+
+func TestDuplicateSequenceDrop(t *testing.T) {
+	h := setupTestHarness(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	authCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_test_key_123")
+	stream, err := h.client.StreamCall(authCtx)
+	if err != nil {
+		t.Fatalf("failed opening stream: %v", err)
+	}
+
+	callID := "call_duplicate_seq_test_02"
+	eventsCh := make(chan *pb.CallEvent, 32)
+
+	go func() {
+		for {
+			event, recvErr := stream.Recv()
+			if recvErr != nil {
+				close(eventsCh)
+				return
+			}
+			eventsCh <- event
+		}
+	}()
+
+	// 1. Send Sequence 1 (processed)
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  1,
+		Data:      []byte("chunk_1"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	// 2. Re-send Sequence 1 (Duplicate: already processed! Must be dropped)
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  1,
+		Data:      []byte("chunk_1_duplicate"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	// 3. Send Sequence 3 (Buffered, waiting for sequence 2)
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  3,
+		Data:      []byte("chunk_3"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	// 4. Re-send Sequence 3 (Duplicate while buffered! Must be dropped)
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  3,
+		Data:      []byte("chunk_3_duplicate"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	// 5. Send Sequence 2 (Missing chunk: triggers contiguous processing of 2 and 3)
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  2,
+		Data:      []byte("chunk_2"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	// 6. Send Sequence 4 (Final frame)
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  4,
+		Data:      []byte("chunk_4_final"),
+		IsFinal:   true,
+		Timestamp: time.Now().UnixMilli(),
+	})
+
+	_ = stream.CloseSend()
+
+	for range eventsCh {
+	}
+
+	summary, err := h.client.GetCallSummary(authCtx, &pb.SummaryRequest{CallId: callID})
+	if err != nil {
+		t.Fatalf("failed retrieving summary: %v", err)
+	}
+
+	// Must be exactly 4 unique chunks (not 6!)
+	if summary.TotalChunks != 4 {
+		t.Fatalf("expected exactly 4 total chunks after deduplication, got %d", summary.TotalChunks)
 	}
 }
