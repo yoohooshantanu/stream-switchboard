@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/yoohooshantanu/streambridge/internal/logger"
+	"github.com/yoohooshantanu/streambridge/internal/metrics"
 	"github.com/yoohooshantanu/streambridge/internal/pb"
 	"github.com/yoohooshantanu/streambridge/internal/router"
 )
@@ -55,8 +56,9 @@ type CallErrorEvent struct {
 }
 
 type WorkerJob struct {
-	CallID string
-	Chunk  *pb.AudioChunk
+	CallID     string
+	Chunk      *pb.AudioChunk
+	EnqueuedAt time.Time
 }
 
 type callSession struct {
@@ -153,11 +155,13 @@ func (p *AIWorkerPool) Submit(job *WorkerJob) bool {
 	}
 
 	workerIdx := hashCallID(job.CallID, p.numWorkers)
+	job.EnqueuedAt = time.Now()
 
 	select {
 	case <-p.stopCh:
 		return false
 	case p.workerQueues[workerIdx] <- job:
+		metrics.DefaultMetrics.SetWorkerQueueDepth(workerIdx, float64(len(p.workerQueues[workerIdx])))
 		return true
 	}
 }
@@ -182,6 +186,7 @@ func (p *AIWorkerPool) workerLoop(workerID int) {
 
 		case <-ticker.C:
 			now := time.Now()
+			metrics.DefaultMetrics.SetWorkerQueueDepth(workerID, float64(len(queue)))
 
 			// Evict expired tombstones
 			for cID, abortedAt := range abortedCalls {
@@ -200,6 +205,7 @@ func (p *AIWorkerPool) workerLoop(workerID int) {
 
 				// Sequence gap timeout: if an out-of-order gap stall exceeds gapTimeout, abort with explicit EVENT_CALL_ERROR
 				if len(sess.pendingChunks) > 0 && !sess.gapStartTime.IsZero() && now.Sub(sess.gapStartTime) >= p.gapTimeout {
+					metrics.DefaultMetrics.IncSequenceGapTimeout()
 					logger.L.Warn("session_sequence_gap_timeout_expired", "call_id", callID, "expected", sess.nextExpectedSeq, "pending", len(sess.pendingChunks), "waited", now.Sub(sess.gapStartTime))
 					p.emitCallError(callID, "sequence_gap_timeout", fmt.Sprintf("stream stalled waiting for frame sequence %d for %v; missing frame never arrived", sess.nextExpectedSeq, p.gapTimeout))
 					delete(sessions, callID)
@@ -212,6 +218,10 @@ func (p *AIWorkerPool) workerLoop(workerID int) {
 		case job, ok := <-queue:
 			if !ok {
 				return
+			}
+			metrics.DefaultMetrics.SetWorkerQueueDepth(workerID, float64(len(queue)))
+			if !job.EnqueuedAt.IsZero() {
+				metrics.DefaultMetrics.ObservePacketQueueWait(time.Since(job.EnqueuedAt).Seconds())
 			}
 			p.dispatchJob(sessions, abortedCalls, job, workerID)
 		}
@@ -252,6 +262,7 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, abortedCall
 	// Drop chunks destined for previously aborted calls to prevent zombie session resurrects
 	if abortedAt, isAborted := abortedCalls[callID]; isAborted {
 		if time.Since(abortedAt) <= AbortedCallTombstoneTTL {
+			metrics.DefaultMetrics.IncLateFrameTombstoneDropped()
 			logger.L.Debug("dropping_chunk_for_aborted_session", "call_id", callID, "seq", chunk.Sequence)
 			return
 		}
@@ -275,6 +286,7 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, abortedCall
 	if chunk.Sequence > 0 {
 		// 1. Drop already-processed duplicate sequence
 		if chunk.Sequence < sess.nextExpectedSeq {
+			metrics.DefaultMetrics.IncDuplicateFrameDropped()
 			logger.L.Debug("ignoring_duplicate_processed_chunk", "call_id", callID, "seq", chunk.Sequence, "expected", sess.nextExpectedSeq)
 			return
 		}
@@ -296,6 +308,7 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, abortedCall
 			}
 
 			if _, alreadyBuffered := sess.pendingChunks[chunk.Sequence]; alreadyBuffered {
+				metrics.DefaultMetrics.IncDuplicateFrameDropped()
 				logger.L.Debug("ignoring_duplicate_buffered_chunk", "call_id", callID, "seq", chunk.Sequence)
 				return
 			}
@@ -308,7 +321,10 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, abortedCall
 	}
 
 	// 3. Process current chunk (matches nextExpectedSeq, or chunk.Sequence == 0)
+	procStart := time.Now()
 	p.executeChunk(sess, chunk)
+	metrics.DefaultMetrics.ObservePacketProcessing(time.Since(procStart).Seconds())
+
 	if chunk.Sequence > 0 {
 		sess.nextExpectedSeq = chunk.Sequence + 1
 	}
@@ -322,7 +338,9 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, abortedCall
 			break
 		}
 		delete(sess.pendingChunks, sess.nextExpectedSeq)
+		bufProcStart := time.Now()
 		p.executeChunk(sess, nextJob.Chunk)
+		metrics.DefaultMetrics.ObservePacketProcessing(time.Since(bufProcStart).Seconds())
 		if nextJob.Chunk.IsFinal {
 			isFinalEncountered = true
 		}

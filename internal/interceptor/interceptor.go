@@ -214,7 +214,7 @@ func UnaryLoggingInterceptor(
 		}
 	}
 
-	metrics.DefaultMetrics.IncRPC(err != nil)
+	metrics.DefaultMetrics.RecordRPC(info.FullMethod, statusCode.String(), duration.Seconds())
 	logger.L.Info("grpc_unary_call",
 		"method", info.FullMethod,
 		"status", statusCode.String(),
@@ -246,7 +246,7 @@ func StreamLoggingInterceptor(
 		}
 	}
 
-	metrics.DefaultMetrics.IncRPC(err != nil)
+	metrics.DefaultMetrics.RecordRPC(info.FullMethod, statusCode.String(), duration.Seconds())
 	logger.L.Info("grpc_stream_closed",
 		"method", info.FullMethod,
 		"status", statusCode.String(),
