@@ -199,26 +199,26 @@ go test -run='^$' -bench='BenchmarkConcurrentStreamsWithGaps' -benchmem -count=1
 benchstat baseline.txt optimized.txt
 ```
 
-**Statistical Comparison (`benchstat -count=10`)**:
+**Statistical Comparison (`benchstat -count=10 baseline.txt optimized.txt`)**:
 ```
 goarch: amd64
 pkg: github.com/yoohooshantanu/streambridge/tests
 cpu: AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx  
                             │ baseline.txt │            optimized.txt             │
                             │    sec/op    │    sec/op     vs base                │
-ConcurrentStreamsWithGaps-8   5.316m ± 23%   4.015m ± 10%  -24.46% (p=0.000 n=10)
+ConcurrentStreamsWithGaps-8   5.125m ± 18%   4.370m ± 12%  -14.72% (p=0.003 n=10)
 
                             │ baseline.txt │            optimized.txt             │
                             │     B/op     │     B/op      vs base                │
-ConcurrentStreamsWithGaps-8   896.5Ki ± 0%   683.4Ki ± 0%  -23.77% (p=0.000 n=10)
+ConcurrentStreamsWithGaps-8   895.7Ki ± 0%   712.8Ki ± 0%  -20.42% (p=0.000 n=10)
 
                             │ baseline.txt │            optimized.txt            │
                             │  allocs/op   │  allocs/op   vs base                │
-ConcurrentStreamsWithGaps-8    15.73k ± 0%   12.44k ± 0%  -20.90% (p=0.000 n=10)
+ConcurrentStreamsWithGaps-8    15.73k ± 0%   12.97k ± 0%  -17.57% (p=0.000 n=10)
 ```
-* **Latency**: Reduced from 5.316 ms to 4.015 ms (**-24.46%** faster per operation, $p=0.000$).
-* **Memory Allocated**: Reduced from 896.5 KiB to 683.4 KiB (**-23.77%** less memory per operation, $p=0.000$).
-* **Allocations**: Reduced from 15.73k to 12.44k (**-20.90%** fewer allocations per operation, $p=0.000$).
+* **Latency**: Reduced from 5.125 ms to 4.370 ms (**-14.72%** faster per operation, $p=0.003$).
+* **Memory Allocated**: Reduced from 895.7 KiB to 712.8 KiB (**-20.42%** less memory per operation, $p=0.000$).
+* **Allocations**: Reduced from 15.73k to 12.97k (**-17.57%** fewer allocations per operation, $p=0.000$).
 
 ---
 
