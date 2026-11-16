@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"sync"
@@ -20,6 +19,16 @@ const (
 	MaxSequenceGap = 128
 	// DefaultGapTimeout is the maximum duration an out-of-order sequence gap can stall before the session aborts with EVENT_CALL_ERROR
 	DefaultGapTimeout = 2 * time.Second
+	// AbortedCallTombstoneTTL defines how long aborted callIDs are remembered to prevent zombie resurrects.
+	// 60 seconds exceeds typical carrier SIP/WebRTC renegotiation and teardown windows.
+	AbortedCallTombstoneTTL = 60 * time.Second
+	// MaxAbortedTombstones caps worker-local memory to 1024 tombstones per worker.
+	MaxAbortedTombstones = 1024
+
+	// Pre-computed static JSON event payloads to avoid reflection and heap allocation in hot audio path
+	intentDetectedPayload   = `{"confidence":0.94,"intent":"customer_support_inquiry"}`
+	positiveSentimentPayload = `{"score":0.88,"sentiment":"positive"}`
+	neutralSentimentPayload  = `{"score":0.88,"sentiment":"neutral"}`
 )
 
 type WorkerJob struct {
@@ -93,15 +102,12 @@ func (p *AIWorkerPool) SetGapTimeout(d time.Duration) {
 }
 
 func (p *AIWorkerPool) emitCallError(callID, errCode, errMsg string) {
-	payload, _ := json.Marshal(map[string]interface{}{
-		"error":   errCode,
-		"message": errMsg,
-	})
+	payload := fmt.Sprintf(`{"error":%q,"message":%q}`, errCode, errMsg)
 	seq := atomic.AddUint64(&p.eventSeq, 1)
 	p.router.Publish(callID, &pb.CallEvent{
 		CallId:    callID,
 		Type:      pb.EventType_EVENT_CALL_ERROR,
-		Payload:   string(payload),
+		Payload:   payload,
 		Sequence:  seq,
 		Timestamp: time.Now().UnixMilli(),
 	})
@@ -137,6 +143,7 @@ func (p *AIWorkerPool) workerLoop(workerID int) {
 	// Each worker goroutine exclusively owns the state for its partitioned callIDs.
 	// No mutex contention across workers!
 	sessions := make(map[string]*callSession)
+	abortedCalls := make(map[string]time.Time)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -149,6 +156,14 @@ func (p *AIWorkerPool) workerLoop(workerID int) {
 
 		case <-ticker.C:
 			now := time.Now()
+
+			// Evict expired tombstones
+			for cID, abortedAt := range abortedCalls {
+				if now.Sub(abortedAt) > AbortedCallTombstoneTTL {
+					delete(abortedCalls, cID)
+				}
+			}
+
 			for callID, sess := range sessions {
 				// Evict abandoned sessions with no activity for > 15 minutes
 				if now.Sub(sess.lastActivity) > 15*time.Minute {
@@ -162,6 +177,20 @@ func (p *AIWorkerPool) workerLoop(workerID int) {
 					logger.L.Warn("session_sequence_gap_timeout_expired", "call_id", callID, "expected", sess.nextExpectedSeq, "pending", len(sess.pendingChunks), "waited", now.Sub(sess.gapStartTime))
 					p.emitCallError(callID, "sequence_gap_timeout", fmt.Sprintf("stream stalled waiting for frame sequence %d for %v; missing frame never arrived", sess.nextExpectedSeq, p.gapTimeout))
 					delete(sessions, callID)
+
+					// Bounded tombstone insertion: evict oldest if capacity is reached
+					if len(abortedCalls) >= MaxAbortedTombstones {
+						var oldestKey string
+						var oldestTime time.Time
+						for k, t := range abortedCalls {
+							if oldestKey == "" || t.Before(oldestTime) {
+								oldestKey = k
+								oldestTime = t
+							}
+						}
+						delete(abortedCalls, oldestKey)
+					}
+					abortedCalls[callID] = now
 				}
 			}
 
@@ -169,12 +198,12 @@ func (p *AIWorkerPool) workerLoop(workerID int) {
 			if !ok {
 				return
 			}
-			p.dispatchJob(sessions, job, workerID)
+			p.dispatchJob(sessions, abortedCalls, job, workerID)
 		}
 	}
 }
 
-func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, job *WorkerJob, workerID int) {
+func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, abortedCalls map[string]time.Time, job *WorkerJob, workerID int) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.L.Error("worker_job_dispatch_panic_recovered", "call_id", job.CallID, "worker_id", workerID, "panic", r)
@@ -185,6 +214,15 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, job *Worker
 	chunk := job.Chunk
 	if chunk == nil {
 		return
+	}
+
+	// Drop chunks destined for previously aborted calls to prevent zombie session resurrects
+	if abortedAt, isAborted := abortedCalls[callID]; isAborted {
+		if time.Since(abortedAt) <= AbortedCallTombstoneTTL {
+			logger.L.Debug("dropping_chunk_for_aborted_session", "call_id", callID, "seq", chunk.Sequence)
+			return
+		}
+		delete(abortedCalls, callID)
 	}
 
 	sess, exists := sessions[callID]
@@ -275,38 +313,31 @@ func (p *AIWorkerPool) executeChunk(sess *callSession, chunk *pb.AudioChunk) {
 	nowMs := time.Now().UnixMilli()
 
 	// 1. ASR: emit partial transcript on chunk
-	partialText := fmt.Sprintf("Speaker audio frame %d acknowledged (%d bytes)", chunk.Sequence, len(chunk.Data))
-	partialPayload, _ := json.Marshal(map[string]interface{}{
-		"text":        partialText,
-		"confidence":  0.96,
-		"is_speaking": !chunk.IsFinal,
-	})
+	// Formatted directly without dynamic map allocation or reflection-based JSON marshaling
+	partialPayload := fmt.Sprintf(`{"confidence":0.96,"is_speaking":%t,"text":"Speaker audio frame %d acknowledged (%d bytes)"}`,
+		!chunk.IsFinal, chunk.Sequence, len(chunk.Data))
 
 	seq := atomic.AddUint64(&p.eventSeq, 1)
 	p.router.Publish(callID, &pb.CallEvent{
 		CallId:    callID,
 		Type:      pb.EventType_EVENT_TRANSCRIPT_PARTIAL,
-		Payload:   string(partialPayload),
+		Payload:   partialPayload,
 		Sequence:  seq,
 		Timestamp: nowMs,
 	})
 	sess.eventCount++
 
-	// 2. Real-time Sentiment every 3rd chunk
+	// 2. Real-time Sentiment every 3rd chunk (zero-alloc pre-computed payload)
 	if chunkCount%3 == 0 {
-		sentiment := "positive"
+		sentPayload := positiveSentimentPayload
 		if chunkCount%2 == 0 {
-			sentiment = "neutral"
+			sentPayload = neutralSentimentPayload
 		}
-		sentPayload, _ := json.Marshal(map[string]interface{}{
-			"sentiment": sentiment,
-			"score":     0.88,
-		})
 		sSeq := atomic.AddUint64(&p.eventSeq, 1)
 		p.router.Publish(callID, &pb.CallEvent{
 			CallId:    callID,
 			Type:      pb.EventType_EVENT_SENTIMENT,
-			Payload:   string(sentPayload),
+			Payload:   sentPayload,
 			Sequence:  sSeq,
 			Timestamp: nowMs,
 		})
@@ -315,33 +346,27 @@ func (p *AIWorkerPool) executeChunk(sess *callSession, chunk *pb.AudioChunk) {
 
 	// 3. Finalization events upon last chunk
 	if chunk.IsFinal {
+		dur := time.Since(sess.startTime).Milliseconds()
+
 		// Final Transcript Event
 		finalText := fmt.Sprintf("Full transcribed call session consisting of %d chunks.", chunkCount)
-		finalPayload, _ := json.Marshal(map[string]interface{}{
-			"transcript":  finalText,
-			"confidence":  0.98,
-			"duration_ms": time.Since(sess.startTime).Milliseconds(),
-		})
+		finalPayload := fmt.Sprintf(`{"confidence":0.98,"duration_ms":%d,"transcript":%q}`, dur, finalText)
 		fSeq := atomic.AddUint64(&p.eventSeq, 1)
 		p.router.Publish(callID, &pb.CallEvent{
 			CallId:    callID,
 			Type:      pb.EventType_EVENT_TRANSCRIPT_FINAL,
-			Payload:   string(finalPayload),
+			Payload:   finalPayload,
 			Sequence:  fSeq,
 			Timestamp: nowMs,
 		})
 		sess.eventCount++
 
-		// Intent Detection Event
-		intentPayload, _ := json.Marshal(map[string]interface{}{
-			"intent":     "customer_support_inquiry",
-			"confidence": 0.94,
-		})
+		// Intent Detection Event (zero-alloc static payload)
 		iSeq := atomic.AddUint64(&p.eventSeq, 1)
 		p.router.Publish(callID, &pb.CallEvent{
 			CallId:    callID,
 			Type:      pb.EventType_EVENT_INTENT_DETECTED,
-			Payload:   string(intentPayload),
+			Payload:   intentDetectedPayload,
 			Sequence:  iSeq,
 			Timestamp: nowMs,
 		})
@@ -358,7 +383,6 @@ func (p *AIWorkerPool) executeChunk(sess *callSession, chunk *pb.AudioChunk) {
 		})
 		sess.eventCount++
 
-		dur := time.Since(sess.startTime).Milliseconds()
 		totEvents := sess.eventCount
 
 		summary := &pb.CallSummary{

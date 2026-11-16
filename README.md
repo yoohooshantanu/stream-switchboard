@@ -131,6 +131,7 @@ To eliminate lock contention and race conditions during concurrent audio chunk i
 - **Bounded Out-of-Order Sequence Reassembly**: An out-of-order sequence reassembly buffer (`pendingChunks map[uint64]*WorkerJob`) holds any frames that arrive ahead of `nextExpectedSeq`. Frames are capped at `MaxPendingChunksPerCall = 64` and `MaxSequenceGap = 128`.
 - **Explicit Caller Notification**: If an incoming frame exceeds the maximum sequence gap or the buffer is saturated, the frame is dropped and the client is immediately notified via an `EVENT_CALL_ERROR` event.
 - **Deterministic Gap Timeout & Eviction**: If a sequence gap remains stalled without the missing frame arriving, the worker's background ticker aborts the stalled session after `DefaultGapTimeout` (2 seconds), emits an `EVENT_CALL_ERROR` with `sequence_gap_timeout`, terminates the gRPC stream with `codes.DataLoss`, and evicts worker session memory to prevent indefinite hanging or memory leakage.
+- **Worker-Local Tombstone Protection (Zombie Session Prevention)**: When a call aborts due to a gap timeout, an entry is inserted into a worker-local `abortedCalls map[string]time.Time` cache (`AbortedCallTombstoneTTL = 60s`, capped at `MaxAbortedTombstones = 1024`). Any delayed/retransmitted audio frames arriving after the abort are dropped immediately without re-instantiating a new session expecting sequence 1. Because each worker exclusively owns its call partition, tombstone checking requires zero mutex locks.
 
 ### 3. Strict Tenant Isolation & Key Registry
 - Incoming API keys are verified against a strict `KeyRegistry`. Wildcard prefixes (`strings.HasPrefix`) are strictly rejected.
@@ -163,19 +164,45 @@ Because `unsubscribe()` must acquire `r.mu.Lock()` before removing and closing `
 
 ## Benchmark Results
 
-Real benchmark executed via in-process `bufconn` listener (Windows amd64, AMD Ryzen 5 3500U):
+All benchmarks executed via in-process `bufconn` listener (Windows amd64, AMD Ryzen 5 3500U, Go 1.23.12).
 
+### 1. Sequential Stream Throughput
 ```
 pkg: github.com/yoohooshantanu/streambridge/tests
 BenchmarkStreamBridgeThroughput-8    4726    233320 ns/op    13952 B/op    227 allocs/op
 ```
+* **~233 µs per full end-to-end stream session**, including HTTP/2 bidi stream initialization, 3 audio chunks, ASR/Sentiment/Intent processing, event fan-out, and clean response drain.
 
-* **~233 µs per full end-to-end stream session**, including:
-  * HTTP/2 bidi stream initialization
-  * Ingesting 3 audio chunks
-  * AI worker pipeline processing (ASR, Sentiment, Intent)
-  * Event fan-out dispatch
-  * Client stream closure and full response drain
+### 2. Concurrent Out-of-Order Streams Profiling & Optimization
+A high-concurrency benchmark (`BenchmarkConcurrentStreamsWithGaps`) simulates 20 concurrent bidirectional gRPC voice calls delivering scrambled out-of-order audio frames.
+
+Profiling (`go tool pprof`) revealed that dynamic `json.Marshal(map[string]interface{}{...})` calls inside `executeChunk` accounted for 18.0% of CPU runtime and 21.1% of heap allocations due to reflection, map sorting, and `interface{}` boxing.
+
+**Optimization**:
+1. Static payload caching (`positiveSentimentPayload`, `neutralSentimentPayload`, `intentDetectedPayload`).
+2. Reflection-free formatted string templates for partial/final transcripts and error payloads.
+3. Right-sized subscriber channel buffers from 512 to 128 items in `StreamCall`.
+
+**Statistical Comparison (`benchstat -count=10 baseline.txt optimized.txt`)**:
+```
+goarch: amd64
+pkg: github.com/yoohooshantanu/streambridge/tests
+cpu: AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx  
+                            │ baseline.txt │            optimized.txt             │
+                            │    sec/op    │    sec/op     vs base                │
+ConcurrentStreamsWithGaps-8   5.316m ± 23%   4.015m ± 10%  -24.46% (p=0.000 n=10)
+
+                            │ baseline.txt │            optimized.txt             │
+                            │     B/op     │     B/op      vs base                │
+ConcurrentStreamsWithGaps-8   896.5Ki ± 0%   683.4Ki ± 0%  -23.77% (p=0.000 n=10)
+
+                            │ baseline.txt │            optimized.txt            │
+                            │  allocs/op   │  allocs/op   vs base                │
+ConcurrentStreamsWithGaps-8    15.73k ± 0%   12.44k ± 0%  -20.90% (p=0.000 n=10)
+```
+* **Latency**: Reduced from 5.316 ms to 4.015 ms (**-24.46%** faster).
+* **Heap Allocated**: Reduced from 896.5 KiB to 683.4 KiB (**-23.77%** less memory).
+* **Allocations**: Reduced from 15.73k to 12.44k (**-20.90%** fewer allocations per operation).
 
 ---
 

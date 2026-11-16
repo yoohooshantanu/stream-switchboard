@@ -838,3 +838,127 @@ func TestGapTimeoutSessionTermination(t *testing.T) {
 		t.Fatalf("expected stream termination with codes.DataLoss, got status %v (err: %v)", st.Code(), finalStreamErr)
 	}
 }
+
+func TestFrameArrivingAfterGapTimeoutAbort(t *testing.T) {
+	h := setupTestHarness(t)
+	// Aggressive gap timeout for fast, deterministic testing
+	h.pool.SetGapTimeout(100 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	authCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_test_key_123")
+	stream, err := h.client.StreamCall(authCtx)
+	if err != nil {
+		t.Fatalf("failed opening stream: %v", err)
+	}
+
+	callID := "call_post_abort_zombie_prevention_01"
+
+	// 1. Send chunk sequence 1
+	if err := stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  1,
+		Data:      []byte("audio_chunk_1"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("failed sending chunk 1: %v", err)
+	}
+
+	// 2. Send chunk sequence 3 (sequence 2 is missing, creating a sequence gap)
+	if err := stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  3,
+		Data:      []byte("audio_chunk_3"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("failed sending chunk 3: %v", err)
+	}
+
+	_ = stream.CloseSend()
+
+	// 3. Receive events until gap timeout aborts the stream with codes.DataLoss
+	var receivedErrorEvent bool
+	var streamErr error
+	for {
+		ev, recvErr := stream.Recv()
+		if recvErr != nil {
+			streamErr = recvErr
+			break
+		}
+		if ev.Type == pb.EventType_EVENT_CALL_ERROR {
+			receivedErrorEvent = true
+		}
+	}
+
+	if !receivedErrorEvent {
+		t.Fatalf("expected EVENT_CALL_ERROR event before stream closure")
+	}
+
+	st, ok := status.FromError(streamErr)
+	if !ok || st.Code() != codes.DataLoss {
+		t.Fatalf("expected stream to terminate with codes.DataLoss, got %v (%v)", st.Code(), streamErr)
+	}
+
+	// 4. Verify tombstone protection:
+	// Subscribe to router to verify that any late-arriving chunks do NOT emit events or resurrect state
+	eventCh, unsubscribe, subErr := h.router.SubscribeForTenant(callID, "tenant_test", 16)
+	if subErr != nil {
+		t.Fatalf("failed subscribing to verify tombstone: %v", subErr)
+	}
+	defer unsubscribe()
+
+	// Dispatch late chunks for the aborted call (e.g. sequence 2 arriving after abort, or late retransmit sequence 4)
+	okSubmit := h.pool.Submit(&worker.WorkerJob{
+		CallID: callID,
+		Chunk: &pb.AudioChunk{
+			CallId:    callID,
+			TenantId:  "tenant_test",
+			Sequence:  2,
+			Data:      []byte("late_audio_chunk_2"),
+			IsFinal:   false,
+			Timestamp: time.Now().UnixMilli(),
+		},
+	})
+	if !okSubmit {
+		t.Fatalf("failed submitting late chunk to pool")
+	}
+
+	okSubmit4 := h.pool.Submit(&worker.WorkerJob{
+		CallID: callID,
+		Chunk: &pb.AudioChunk{
+			CallId:    callID,
+			TenantId:  "tenant_test",
+			Sequence:  4,
+			Data:      []byte("late_audio_chunk_4"),
+			IsFinal:   true,
+			Timestamp: time.Now().UnixMilli(),
+		},
+	})
+	if !okSubmit4 {
+		t.Fatalf("failed submitting late chunk 4 to pool")
+	}
+
+	// Ensure no events were emitted for the tombstoned call
+	select {
+	case ev, ok := <-eventCh:
+		if ok {
+			t.Fatalf("unexpected event emitted for aborted tombstoned call: type=%v payload=%s", ev.Type, ev.Payload)
+		}
+	case <-time.After(200 * time.Millisecond):
+		// Expected: late chunks were safely dropped by worker tombstone filter
+	}
+
+	// 5. Verify no completed summary was created for the aborted session
+	_, summaryErr := h.client.GetCallSummary(authCtx, &pb.SummaryRequest{CallId: callID})
+	if summaryErr == nil {
+		t.Fatalf("expected NotFound error for aborted call summary, got success")
+	}
+	if sumSt, isSt := status.FromError(summaryErr); !isSt || sumSt.Code() != codes.NotFound {
+		t.Fatalf("expected NotFound status code, got %v (%v)", sumSt.Code(), summaryErr)
+	}
+}

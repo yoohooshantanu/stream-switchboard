@@ -68,7 +68,7 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 	logger.L.Info("bidi_stream_connected", "call_id", callID, "tenant_id", firstChunk.TenantId)
 
 	// Subscribe to event router to receive real-time events for this call
-	eventCh, unsubscribe, subErr := s.router.SubscribeForTenant(callID, firstChunk.TenantId, 512)
+	eventCh, unsubscribe, subErr := s.router.SubscribeForTenant(callID, firstChunk.TenantId, 128)
 	if subErr != nil {
 		return subErr
 	}
