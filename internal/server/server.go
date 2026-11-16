@@ -5,6 +5,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/yoohooshantanu/streambridge/internal/interceptor"
 	"github.com/yoohooshantanu/streambridge/internal/logger"
 	"github.com/yoohooshantanu/streambridge/internal/metrics"
 	"github.com/yoohooshantanu/streambridge/internal/pb"
@@ -34,6 +35,7 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 	defer metrics.DefaultMetrics.DecStream()
 
 	ctx := stream.Context()
+	authTenantID, _ := interceptor.TenantFromContext(ctx)
 
 	// Wait for the first chunk to establish call identity
 	firstChunk, err := stream.Recv()
@@ -49,10 +51,26 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 		return status.Error(codes.InvalidArgument, "call_id cannot be empty")
 	}
 
+	// Validate tenant consistency with authenticated credentials
+	if firstChunk.TenantId != "" && authTenantID != "" && firstChunk.TenantId != authTenantID {
+		return status.Errorf(codes.PermissionDenied, "audio chunk tenant_id %q does not match authenticated tenant %q", firstChunk.TenantId, authTenantID)
+	}
+	if firstChunk.TenantId == "" && authTenantID != "" {
+		firstChunk.TenantId = authTenantID
+	}
+
+	// Register call ownership with tenant isolation
+	if regErr := s.router.RegisterCall(callID, firstChunk.TenantId); regErr != nil {
+		return regErr
+	}
+
 	logger.L.Info("bidi_stream_connected", "call_id", callID, "tenant_id", firstChunk.TenantId)
 
 	// Subscribe to event router to receive real-time events for this call
-	eventCh, unsubscribe := s.router.Subscribe(callID, 512)
+	eventCh, unsubscribe, subErr := s.router.SubscribeForTenant(callID, firstChunk.TenantId, 512)
+	if subErr != nil {
+		return subErr
+	}
 	defer unsubscribe()
 
 	// Track audio ingestion metrics
@@ -87,16 +105,21 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 				return
 			}
 
+			// Validate chunk tenant consistency
+			if chunk.TenantId != "" && authTenantID != "" && chunk.TenantId != authTenantID {
+				errCh <- status.Errorf(codes.PermissionDenied, "audio chunk tenant_id %q does not match authenticated tenant %q", chunk.TenantId, authTenantID)
+				return
+			}
+			if chunk.TenantId == "" && authTenantID != "" {
+				chunk.TenantId = authTenantID
+			}
+
 			metrics.DefaultMetrics.IncChunk(len(chunk.Data))
 			if !s.pool.Submit(&worker.WorkerJob{
 				CallID: callID,
 				Chunk:  chunk,
 			}) {
 				errCh <- status.Errorf(codes.ResourceExhausted, "worker pool queue saturated")
-				return
-			}
-
-			if chunk.IsFinal {
 				return
 			}
 		}
@@ -155,9 +178,24 @@ func (s *StreamBridgeServer) WatchCall(req *pb.WatchRequest, stream grpc.ServerS
 		return status.Error(codes.InvalidArgument, "call_id is required")
 	}
 
-	logger.L.Info("watch_call_subscription_started", "call_id", req.CallId, "tenant_id", req.TenantId)
+	authTenantID, _ := interceptor.TenantFromContext(stream.Context())
 
-	eventCh, unsubscribe := s.router.Subscribe(req.CallId, 512)
+	// Validate cross-tenant watcher permission
+	if req.TenantId != "" && authTenantID != "" && req.TenantId != authTenantID {
+		return status.Errorf(codes.PermissionDenied, "requested tenant_id %q does not match authenticated tenant %q", req.TenantId, authTenantID)
+	}
+
+	targetTenant := authTenantID
+	if targetTenant == "" {
+		targetTenant = req.TenantId
+	}
+
+	logger.L.Info("watch_call_subscription_started", "call_id", req.CallId, "tenant_id", targetTenant)
+
+	eventCh, unsubscribe, err := s.router.SubscribeForTenant(req.CallId, targetTenant, 512)
+	if err != nil {
+		return err
+	}
 	defer unsubscribe()
 
 	ctx := stream.Context()
@@ -185,15 +223,21 @@ func (s *StreamBridgeServer) WatchCall(req *pb.WatchRequest, stream grpc.ServerS
 	}
 }
 
-// GetCallSummary provides unary post-call analytics lookup
+// GetCallSummary provides unary post-call analytics lookup with tenant isolation
 func (s *StreamBridgeServer) GetCallSummary(ctx context.Context, req *pb.SummaryRequest) (*pb.CallSummary, error) {
 	if req.CallId == "" {
 		return nil, status.Error(codes.InvalidArgument, "call_id is required")
 	}
 
-	summary, exists := s.router.GetSummary(req.CallId)
+	authTenantID, _ := interceptor.TenantFromContext(ctx)
+
+	summary, callTenant, exists := s.router.GetSummaryWithTenant(req.CallId)
 	if !exists {
 		return nil, status.Errorf(codes.NotFound, "no completed call summary found for call_id: %s", req.CallId)
+	}
+
+	if authTenantID != "" && callTenant != "" && callTenant != authTenantID {
+		return nil, status.Errorf(codes.PermissionDenied, "access denied: call summary belongs to another tenant")
 	}
 
 	return summary, nil

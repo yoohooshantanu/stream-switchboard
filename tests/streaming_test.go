@@ -96,8 +96,8 @@ func TestBidirectionalStreamCall(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Attach valid authentication credentials
-	authCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_test_key_123")
+	// Attach valid authentication credentials bound to tenant_acme_corp
+	authCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_live_acme_corp_sec99")
 
 	stream, err := h.client.StreamCall(authCtx)
 	if err != nil {
@@ -301,5 +301,176 @@ func TestStreamCallEmptyCallIDRejection(t *testing.T) {
 	st, ok := status.FromError(recvErr)
 	if !ok || st.Code() != codes.InvalidArgument {
 		t.Fatalf("expected InvalidArgument error, got: %v", recvErr)
+	}
+}
+
+func TestTenantIsolationCrossTenantAccessBlocked(t *testing.T) {
+	h := setupTestHarness(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tenantACtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_live_acme_corp_sec99") // tenant_acme_corp
+	tenantBCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_live_growth_tier_key") // tenant_growth_tier
+
+	callID := "call_tenant_isolated_42"
+
+	// 1. Tenant A starts a call
+	streamA, err := h.client.StreamCall(tenantACtx)
+	if err != nil {
+		t.Fatalf("failed starting stream for tenant A: %v", err)
+	}
+
+	err = streamA.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_acme_corp",
+		Sequence:  1,
+		Data:      []byte("tenant_a_audio_data"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("tenant A failed sending initial chunk: %v", err)
+	}
+
+	// 2. Tenant B attempts to WatchCall on Tenant A's call -> Must be PermissionDenied!
+	watchStreamB, err := h.client.WatchCall(tenantBCtx, &pb.WatchRequest{
+		CallId:   callID,
+		TenantId: "tenant_growth_tier",
+	})
+	if err == nil {
+		_, recvErr := watchStreamB.Recv()
+		if recvErr == nil {
+			t.Fatalf("expected WatchCall cross-tenant subscription to be forbidden")
+		}
+		if st, ok := status.FromError(recvErr); !ok || st.Code() != codes.PermissionDenied {
+			t.Fatalf("expected PermissionDenied on cross-tenant WatchCall, got: %v", recvErr)
+		}
+	} else {
+		if st, ok := status.FromError(err); !ok || st.Code() != codes.PermissionDenied {
+			t.Fatalf("expected PermissionDenied on cross-tenant WatchCall dial, got: %v", err)
+		}
+	}
+
+	// 3. Tenant A finishes call with final chunk
+	err = streamA.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_acme_corp",
+		Sequence:  2,
+		Data:      []byte("tenant_a_final_audio"),
+		IsFinal:   true,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("tenant A failed sending final chunk: %v", err)
+	}
+	_ = streamA.CloseSend()
+
+	// Wait for summary to be saved
+	time.Sleep(100 * time.Millisecond)
+
+	// 4. Tenant B attempts to GetCallSummary of Tenant A's call -> Must be PermissionDenied!
+	_, err = h.client.GetCallSummary(tenantBCtx, &pb.SummaryRequest{CallId: callID})
+	if err == nil {
+		t.Fatalf("expected GetCallSummary to fail with PermissionDenied for cross-tenant request")
+	}
+	if st, ok := status.FromError(err); !ok || st.Code() != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied on cross-tenant summary lookup, got: %v", err)
+	}
+
+	// 5. Tenant A requests GetCallSummary -> Must succeed!
+	summaryA, err := h.client.GetCallSummary(tenantACtx, &pb.SummaryRequest{CallId: callID})
+	if err != nil {
+		t.Fatalf("tenant A failed retrieving own summary: %v", err)
+	}
+	if summaryA.CallId != callID || summaryA.TotalChunks != 2 {
+		t.Fatalf("unexpected summary details for tenant A: %+v", summaryA)
+	}
+}
+
+func TestOutOfOrderChunkArrivalSequencing(t *testing.T) {
+	h := setupTestHarness(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	authCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_test_key_123")
+	stream, err := h.client.StreamCall(authCtx)
+	if err != nil {
+		t.Fatalf("failed opening stream: %v", err)
+	}
+
+	callID := "call_reordering_test_99"
+	eventsCh := make(chan *pb.CallEvent, 32)
+
+	go func() {
+		for {
+			event, recvErr := stream.Recv()
+			if recvErr != nil {
+				close(eventsCh)
+				return
+			}
+			eventsCh <- event
+		}
+	}()
+
+	// Send Chunk 1 (Sequence 1)
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  1,
+		Data:      []byte("chunk_1_audio"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	// Send Chunk 3 (Sequence 3, IsFinal: true) BEFORE Chunk 2!
+	// AIWorkerPool must buffer Chunk 3 until Chunk 2 arrives, avoiding premature finalization!
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  3,
+		Data:      []byte("chunk_3_final_audio"),
+		IsFinal:   true,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	time.Sleep(30 * time.Millisecond)
+
+	// Send Chunk 2 (Sequence 2) late
+	_ = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  2,
+		Data:      []byte("chunk_2_intermediate_audio"),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+
+	_ = stream.CloseSend()
+
+	// Collect received events
+	var receivedEvents []*pb.CallEvent
+	for ev := range eventsCh {
+		receivedEvents = append(receivedEvents, ev)
+	}
+
+	// Verify that summary contains all 3 chunks
+	summary, err := h.client.GetCallSummary(authCtx, &pb.SummaryRequest{CallId: callID})
+	if err != nil {
+		t.Fatalf("failed retrieving summary: %v", err)
+	}
+
+	if summary.TotalChunks != 3 {
+		t.Fatalf("expected 3 total chunks in summary despite out-of-order arrival, got %d", summary.TotalChunks)
+	}
+
+	// Verify that EVENT_CALL_ENDED occurred strictly at the end of the event stream
+	if len(receivedEvents) == 0 {
+		t.Fatalf("expected events, got 0")
+	}
+	lastEvent := receivedEvents[len(receivedEvents)-1]
+	if lastEvent.Type != pb.EventType_EVENT_CALL_ENDED {
+		t.Fatalf("expected last event to be EVENT_CALL_ENDED, got type %v", lastEvent.Type)
 	}
 }

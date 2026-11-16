@@ -11,12 +11,23 @@
 ## Key Capabilities
 
 * **Bidirectional gRPC Streaming (`StreamCall`)**: Full duplex client-to-server and server-to-client streaming over HTTP/2 with independent goroutine isolation for `Recv()` and `Send()`.
+* **Hash-Partitioned Worker Queues & Serial Chunk Ordering**: Partitioned actor channels keyed by `callID` (`hash(callID) % numWorkers`) eliminate cross-worker lock contention and strictly serialize chunk processing per call.
+* **Per-Call Sequencing & Reassembly**: Monotonic sequence tracking (`nextExpectedSeq`) buffers out-of-order frames, guaranteeing that finalization (`is_final = true`) never races ahead of preceding frames.
+* **Multi-Tenant Isolation**: Rigorous tenant ownership binding in `EventRouter` prevents cross-tenant access. Subscriptions (`WatchCall`) and post-call analytics (`GetCallSummary`) reject cross-tenant snooping with `codes.PermissionDenied`.
+* **Zero-Wildcard Authentication Registry**: Centralized `KeyRegistry` binds authorized keys to tenant identities with zero prefix wildcards (eliminating prefix-based bypass risks).
 * **Server-Side Event Fan-Out (`WatchCall`)**: Multi-tenant event hub enabling external services to observe live telephony streams with zero impact on caller stream latency.
 * **Non-Blocking Backpressure Protection**: Bounded subscriber ring buffers with non-blocking drops to prevent slow consumers from lagging upstream voice pipelines.
 * **Hermetic Testing via In-Memory `bufconn`**: 100% network-socket-free unit and integration test suite executing full gRPC interceptor chains without OS port allocation conflicts.
-* **gRPC Interceptor Chains**: Structured metadata authentication (`x-api-key`), execution latency instrumentation, and status code audit logging.
-* **Native gRPC Health Checking**: Fully implements the standard `grpc_health_v1` protocol (`Check` and `Watch`).
 * **Zero-Allocation Telemetry**: Live Prometheus exposition (`/metrics`), `/healthz`, and runtime profiling (`net/http/pprof`) via an isolated HTTP sidecar.
+
+---
+
+## Architectural Scope & Deterministic AI Engines
+
+> [!NOTE]
+> **Transport Architecture vs. Model Inference**: StreamBridge is designed as a carrier-grade streaming network gateway focusing on bidirectional framing, backpressure handling, fan-out distribution, and tenant isolation.
+>
+> The built-in worker processors (ASR streaming transcriber, sentiment analyzer, and intent detector) are **deterministic in-memory streaming mock engines**. This architectural separation allows high-throughput performance benchmarking, hermetic integration testing, and predictable pipeline latency without external GPU clusters, network egress overhead, or third-party SaaS API credits. In production environments, these worker routines act as adapters forwarding raw frames to proprietary or vendor ASR/LLM inference endpoints.
 
 ---
 
@@ -28,26 +39,30 @@
                        │                                                          │
 Telephony Client ─────►│  gRPC Server (:50051)                                    │
 (AudioChunk stream)    │    ├─ UnaryAuthInterceptor & StreamAuthInterceptor       │
+                       │    │    └─► KeyRegistry (Strict Tenant Binding)          │
                        │    └─ Logging & Metrics Interceptors                     │
                        │                                                          │
                        │  StreamCall Handler (Bidirectional)                      │
-                       │    ├─ Goroutine A: stream.Recv() loop                   │
-                       │    │    └─► Pushes to AIWorkerPool queue                 │
+                       │    ├─ Goroutine A: stream.Recv() loop (Ingests to EOF)   │
+                       │    │    └─► Submit(hash(callID) % numWorkers)            │
                        │    │                                                     │
                        │    └─ Goroutine B: stream.Send() loop                   │
                        │         ▲                                                │
                        │         │                                                │
-                       │  EventRouter (Fan-Out Hub) ◄─── Emits CallEvents ───┐   │
-                       │    ├─ Subscribers map[callID][]chan CallEvent       │   │
-                       │    └─ Non-blocking select (backpressure drop)       │   │
-                       │                                                     │   │
-                       │  AIWorkerPool (Bounded Goroutine Pool)              │   │
-                       │    ├─ ASR Engine (Partial / Final transcripts) ─────┤   │
-                       │    ├─ Sentiment Analyzer (Positive/Neutral) ────────┤   │
-                       │    └─ Intent Classifier (Inquiry/Booking) ──────────┘   │
+                       │  EventRouter (Tenant-Isolated Fan-Out Hub) ──────────────┼───┐
+                       │    ├─ callTenants map[callID]tenantID                    │   │
+                       │    ├─ Subscribers map[callID][]chan CallEvent            │   │
+                       │    └─ Non-blocking select (backpressure drop)            │   │
+                       │                                                          │   │
+                       │  AIWorkerPool (Hash-Partitioned Workers)                 │   │
+                       │    ├─ Worker 0..N-1 (Dedicated Per-Worker Queues)        │   │
+                       │    ├─ Out-of-Order Sequence Reassembly Buffer            │   │
+                       │    ├─ ASR Engine (Partial / Final transcripts) ──────────┤   │
+                       │    ├─ Sentiment Analyzer (Positive/Neutral) ─────────────┤   │
+                       │    └─ Intent Classifier (Inquiry/Booking) ───────────────┘   │
                        │                                                          │
 Supervisor / CRM ─────►│  WatchCall Handler (Server Streaming)                   │
-(WatchRequest)         │    └─ Streams CallEvents to external subscribers        │
+(WatchRequest)         │    └─ Enforces Tenant ID Match (codes.PermissionDenied)  │
                        └──────────────────────────────────────────────────────────┘
                                                  │
                                HTTP Sidecar (:8083) ──► /metrics, /healthz, pprof
@@ -65,13 +80,8 @@ package streambridge.v1;
 option go_package = "github.com/yoohooshantanu/streambridge/internal/pb";
 
 service StreamBridge {
-  // Bidirectional audio chunk stream with real-time event responses
   rpc StreamCall(stream AudioChunk) returns (stream CallEvent);
-
-  // Server-side stream subscribing to a live call's fanned-out events
   rpc WatchCall(WatchRequest) returns (stream CallEvent);
-
-  // Unary query retrieving post-call summary and aggregated analytics
   rpc GetCallSummary(SummaryRequest) returns (CallSummary);
 }
 
@@ -112,7 +122,19 @@ In gRPC Go, calling `stream.Send()` and `stream.Recv()` concurrently on the same
 - **Goroutine B** exclusively reads from the per-call `eventCh` and calls `stream.Send()`.
 - A shared `doneCh` coordination pattern ensures that whenever either half finishes or errors, the counterpart goroutine drains and terminates cleanly without leaking resources.
 
-### 2. Lock Ordering & Send-on-Closed-Channel Prevention
+### 2. Hash-Partitioned Worker Queues & Per-Call Sequence Reassembly
+To eliminate lock contention and race conditions during concurrent audio chunk ingestion:
+- Each worker goroutine in `AIWorkerPool` has an independent, non-shared channel (`workerQueues[workerID]`).
+- Audio chunks are deterministically routed to a specific worker using `hash(callID) % numWorkers`.
+- All chunks for a given call are processed by the exact same worker in strict order.
+- In addition, an out-of-order sequence reassembly buffer (`pendingChunks map[uint64]*WorkerJob`) holds any frames that arrive ahead of `nextExpectedSeq`. When preceding frames arrive, the buffer drains in contiguous order, ensuring that finalization events (`EVENT_TRANSCRIPT_FINAL`, `EVENT_CALL_ENDED`) are never triggered prematurely.
+
+### 3. Strict Tenant Isolation & Key Registry
+- Incoming API keys are verified against a strict `KeyRegistry`. Wildcard prefixes (`strings.HasPrefix`) are strictly rejected.
+- Each call is registered to its authenticated tenant.
+- Cross-tenant subscriptions (`WatchCall`) and summary requests (`GetCallSummary`) are rejected with `codes.PermissionDenied`.
+
+### 4. Lock Ordering & Send-on-Closed-Channel Prevention
 To prevent `send on closed channel` panics during subscriber churn, `EventRouter.Publish()` holds `r.mu.RLock()` during channel dispatch:
 ```go
 func (r *EventRouter) Publish(callID string, event *pb.CallEvent) {
@@ -142,10 +164,10 @@ Real benchmark executed via in-process `bufconn` listener (Windows amd64, AMD Ry
 
 ```
 pkg: github.com/yoohooshantanu/streambridge/tests
-BenchmarkStreamBridgeThroughput-8    1911    736811 ns/op    30999 B/op    479 allocs/op
+BenchmarkStreamBridgeThroughput-8    4726    233320 ns/op    13952 B/op    227 allocs/op
 ```
 
-* **~736.8 µs per full end-to-end stream session**, including:
+* **~233 µs per full end-to-end stream session**, including:
   * HTTP/2 bidi stream initialization
   * Ingesting 3 audio chunks
   * AI worker pipeline processing (ASR, Sentiment, Intent)
@@ -158,50 +180,21 @@ BenchmarkStreamBridgeThroughput-8    1911    736811 ns/op    30999 B/op    479 a
 
 ### Prerequisites
 - Go 1.23+
-- (Optional) Docker & Docker Compose
+- Make (optional)
+- Docker (optional)
 
-### Running Locally
-
+### Running Tests Locally
 ```bash
-# Clone the repository
-git clone https://github.com/yoohooshantanu/streambridge.git
-cd streambridge
-
-# Build binary
-go build -o bin/streambridge ./cmd/server
-
-# Start server
-./bin/streambridge
-# gRPC Gateway: :50051
-# HTTP Metrics & Healthz: :8083
-```
-
-### Running Tests
-
-```bash
-# Run hermetic tests with race detector
 go test -v -race ./tests/...
-
-# Run throughput benchmark
-go test -bench=BenchmarkStreamBridgeThroughput -benchmem -run=^$ ./tests/...
 ```
 
----
-
-## Endpoints
-
-| Port | Protocol | Path / Method | Description |
-|---|---|---|---|
-| `:50051` | gRPC | `StreamBridge/StreamCall` | Bidirectional audio & event streaming |
-| `:50051` | gRPC | `StreamBridge/WatchCall` | Server-streaming live event observer |
-| `:50051` | gRPC | `StreamBridge/GetCallSummary`| Post-call analytics lookup |
-| `:50051` | gRPC | `grpc.health.v1.Health/Check`| Standard gRPC health check |
-| `:8083` | HTTP | `GET /healthz` | Kubernetes liveness/readiness probe |
-| `:8083` | HTTP | `GET /metrics` | Prometheus exposition endpoint |
-| `:8083` | HTTP | `GET /debug/pprof/` | Runtime profiling index |
+### Starting the Server
+```bash
+go run cmd/server/main.go
+```
+The gRPC streaming server listens on `:50051`, and the HTTP metrics/pprof sidecar listens on `:8083`.
 
 ---
 
 ## License
-
-MIT © Shantanu Juvekar (`yoohooshantanu`)
+MIT License. Created by Shantanu Juvekar (`santanujuvekar@gmail.com`).

@@ -3,6 +3,7 @@ package worker
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,19 +18,33 @@ type WorkerJob struct {
 	Chunk  *pb.AudioChunk
 }
 
+type callSession struct {
+	callID          string
+	nextExpectedSeq uint64
+	pendingChunks   map[uint64]*WorkerJob
+	chunkCount      int32
+	eventCount      int32
+	startTime       time.Time
+	lastActivity    time.Time
+}
+
 type AIWorkerPool struct {
-	inputQueue   chan *WorkerJob
 	router       *router.EventRouter
 	numWorkers   int
+	workerQueues []chan *WorkerJob
 	wg           sync.WaitGroup
 	stopCh       chan struct{}
 	stopOnce     sync.Once
 	eventSeq     uint64
-	callChunks   map[string]int32
-	callEvents   map[string]int32
-	callStart    map[string]time.Time
-	lastActivity map[string]time.Time
-	callMu       sync.Mutex
+}
+
+func hashCallID(callID string, numWorkers int) int {
+	if numWorkers <= 1 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(callID))
+	return int(h.Sum32() % uint32(numWorkers))
 }
 
 func NewAIWorkerPool(router *router.EventRouter, numWorkers, queueCapacity int) *AIWorkerPool {
@@ -40,15 +55,21 @@ func NewAIWorkerPool(router *router.EventRouter, numWorkers, queueCapacity int) 
 		queueCapacity = 1024
 	}
 
+	perWorkerCap := queueCapacity / numWorkers
+	if perWorkerCap < 64 {
+		perWorkerCap = 64
+	}
+
+	workerQueues := make([]chan *WorkerJob, numWorkers)
+	for i := 0; i < numWorkers; i++ {
+		workerQueues[i] = make(chan *WorkerJob, perWorkerCap)
+	}
+
 	return &AIWorkerPool{
-		inputQueue:   make(chan *WorkerJob, queueCapacity),
 		router:       router,
 		numWorkers:   numWorkers,
+		workerQueues: workerQueues,
 		stopCh:       make(chan struct{}),
-		callChunks:   make(map[string]int32),
-		callEvents:   make(map[string]int32),
-		callStart:    make(map[string]time.Time),
-		lastActivity: make(map[string]time.Time),
 	}
 }
 
@@ -57,43 +78,20 @@ func (p *AIWorkerPool) Start() {
 		p.wg.Add(1)
 		go p.workerLoop(i)
 	}
-	p.wg.Add(1)
-	go p.cleanupLoop()
 	logger.L.Info("ai_worker_pool_started", "workers", p.numWorkers)
 }
 
-func (p *AIWorkerPool) cleanupLoop() {
-	defer p.wg.Done()
-	ticker := time.NewTicker(2 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-p.stopCh:
-			return
-		case <-ticker.C:
-			p.callMu.Lock()
-			now := time.Now()
-			for callID, last := range p.lastActivity {
-				// Evict abandoned calls where client dropped connection without is_final
-				if now.Sub(last) > 15*time.Minute {
-					delete(p.callStart, callID)
-					delete(p.callChunks, callID)
-					delete(p.callEvents, callID)
-					delete(p.lastActivity, callID)
-					logger.L.Debug("evicted_abandoned_call_state", "call_id", callID)
-				}
-			}
-			p.callMu.Unlock()
-		}
-	}
-}
-
 func (p *AIWorkerPool) Submit(job *WorkerJob) bool {
+	if job == nil || job.CallID == "" {
+		return false
+	}
+
+	workerIdx := hashCallID(job.CallID, p.numWorkers)
+
 	select {
 	case <-p.stopCh:
 		return false
-	case p.inputQueue <- job:
+	case p.workerQueues[workerIdx] <- job:
 		return true
 	}
 }
@@ -101,39 +99,104 @@ func (p *AIWorkerPool) Submit(job *WorkerJob) bool {
 func (p *AIWorkerPool) workerLoop(workerID int) {
 	defer p.wg.Done()
 
+	// Share-Nothing Worker State:
+	// Each worker goroutine exclusively owns the state for its partitioned callIDs.
+	// No mutex contention across workers!
+	sessions := make(map[string]*callSession)
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	queue := p.workerQueues[workerID]
+
 	for {
 		select {
 		case <-p.stopCh:
 			return
-		case job, ok := <-p.inputQueue:
+
+		case <-ticker.C:
+			// Evict abandoned sessions with no activity for > 15 minutes
+			now := time.Now()
+			for callID, sess := range sessions {
+				if now.Sub(sess.lastActivity) > 15*time.Minute {
+					delete(sessions, callID)
+					logger.L.Debug("evicted_abandoned_session", "call_id", callID, "worker_id", workerID)
+				}
+			}
+
+		case job, ok := <-queue:
 			if !ok {
 				return
 			}
-			p.processChunk(job)
+			p.dispatchJob(sessions, job, workerID)
 		}
 	}
 }
 
-func (p *AIWorkerPool) processChunk(job *WorkerJob) {
+func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, job *WorkerJob, workerID int) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.L.Error("worker_chunk_processing_panic_recovered", "call_id", job.CallID, "panic", r)
+			logger.L.Error("worker_job_dispatch_panic_recovered", "call_id", job.CallID, "worker_id", workerID, "panic", r)
 		}
 	}()
 
 	callID := job.CallID
 	chunk := job.Chunk
-
-	p.callMu.Lock()
-	now := time.Now()
-	p.lastActivity[callID] = now
-	if _, ok := p.callStart[callID]; !ok {
-		p.callStart[callID] = now
+	if chunk == nil {
+		return
 	}
-	p.callChunks[callID]++
-	chunkCount := p.callChunks[callID]
-	p.callMu.Unlock()
 
+	sess, exists := sessions[callID]
+	if !exists {
+		sess = &callSession{
+			callID:          callID,
+			nextExpectedSeq: chunk.Sequence,
+			pendingChunks:   make(map[uint64]*WorkerJob),
+			startTime:       time.Now(),
+			lastActivity:    time.Now(),
+		}
+		sessions[callID] = sess
+	}
+	sess.lastActivity = time.Now()
+
+	// Sequence Sequencing & Reassembly:
+	// If chunk has sequence > 0 and arrives ahead of expected sequence, buffer it
+	if chunk.Sequence > 0 && sess.nextExpectedSeq > 0 && chunk.Sequence > sess.nextExpectedSeq {
+		sess.pendingChunks[chunk.Sequence] = job
+		return
+	}
+
+	// Process current chunk
+	p.executeChunk(sess, chunk)
+	if chunk.Sequence > 0 && chunk.Sequence >= sess.nextExpectedSeq {
+		sess.nextExpectedSeq = chunk.Sequence + 1
+	}
+
+	isFinalEncountered := chunk.IsFinal
+
+	// Process any buffered chunks that now match contiguous sequence
+	for {
+		nextJob, hasNext := sess.pendingChunks[sess.nextExpectedSeq]
+		if !hasNext {
+			break
+		}
+		delete(sess.pendingChunks, sess.nextExpectedSeq)
+		p.executeChunk(sess, nextJob.Chunk)
+		if nextJob.Chunk.IsFinal {
+			isFinalEncountered = true
+		}
+		sess.nextExpectedSeq++
+	}
+
+	// If call completed, remove session from worker state
+	if isFinalEncountered {
+		delete(sessions, callID)
+	}
+}
+
+func (p *AIWorkerPool) executeChunk(sess *callSession, chunk *pb.AudioChunk) {
+	callID := sess.callID
+	sess.chunkCount++
+	chunkCount := sess.chunkCount
 	nowMs := time.Now().UnixMilli()
 
 	// 1. ASR: emit partial transcript on chunk
@@ -152,7 +215,7 @@ func (p *AIWorkerPool) processChunk(job *WorkerJob) {
 		Sequence:  seq,
 		Timestamp: nowMs,
 	})
-	p.incCallEvents(callID)
+	sess.eventCount++
 
 	// 2. Real-time Sentiment every 3rd chunk
 	if chunkCount%3 == 0 {
@@ -172,7 +235,7 @@ func (p *AIWorkerPool) processChunk(job *WorkerJob) {
 			Sequence:  sSeq,
 			Timestamp: nowMs,
 		})
-		p.incCallEvents(callID)
+		sess.eventCount++
 	}
 
 	// 3. Finalization events upon last chunk
@@ -182,7 +245,7 @@ func (p *AIWorkerPool) processChunk(job *WorkerJob) {
 		finalPayload, _ := json.Marshal(map[string]interface{}{
 			"transcript":  finalText,
 			"confidence":  0.98,
-			"duration_ms": time.Since(p.callStart[callID]).Milliseconds(),
+			"duration_ms": time.Since(sess.startTime).Milliseconds(),
 		})
 		fSeq := atomic.AddUint64(&p.eventSeq, 1)
 		p.router.Publish(callID, &pb.CallEvent{
@@ -192,7 +255,7 @@ func (p *AIWorkerPool) processChunk(job *WorkerJob) {
 			Sequence:  fSeq,
 			Timestamp: nowMs,
 		})
-		p.incCallEvents(callID)
+		sess.eventCount++
 
 		// Intent Detection Event
 		intentPayload, _ := json.Marshal(map[string]interface{}{
@@ -207,7 +270,7 @@ func (p *AIWorkerPool) processChunk(job *WorkerJob) {
 			Sequence:  iSeq,
 			Timestamp: nowMs,
 		})
-		p.incCallEvents(callID)
+		sess.eventCount++
 
 		// Call Ended Event
 		endSeq := atomic.AddUint64(&p.eventSeq, 1)
@@ -218,18 +281,10 @@ func (p *AIWorkerPool) processChunk(job *WorkerJob) {
 			Sequence:  endSeq,
 			Timestamp: nowMs,
 		})
-		p.incCallEvents(callID)
+		sess.eventCount++
 
-		// Aggregate and persist CallSummary
-		p.callMu.Lock()
-		dur := time.Since(p.callStart[callID]).Milliseconds()
-		totEvents := p.callEvents[callID]
-		// Clean up completed call state from in-memory tracking maps
-		delete(p.callStart, callID)
-		delete(p.callChunks, callID)
-		delete(p.callEvents, callID)
-		delete(p.lastActivity, callID)
-		p.callMu.Unlock()
+		dur := time.Since(sess.startTime).Milliseconds()
+		totEvents := sess.eventCount
 
 		summary := &pb.CallSummary{
 			CallId:      callID,
@@ -243,12 +298,6 @@ func (p *AIWorkerPool) processChunk(job *WorkerJob) {
 		p.router.SaveSummary(summary)
 		logger.L.Info("call_summary_saved", "call_id", callID, "chunks", chunkCount, "events", totEvents)
 	}
-}
-
-func (p *AIWorkerPool) incCallEvents(callID string) {
-	p.callMu.Lock()
-	defer p.callMu.Unlock()
-	p.callEvents[callID]++
 }
 
 func (p *AIWorkerPool) Stop() {

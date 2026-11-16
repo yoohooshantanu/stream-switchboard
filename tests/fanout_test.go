@@ -15,7 +15,8 @@ func TestWatchCallFanOut(t *testing.T) {
 	h := setupTestHarness(t)
 
 	callID := "call_fanout_multitenant_01"
-	authCtx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "sb_test_key_123")
+	// Use growth tier credentials which authenticate as tenant_growth_tier
+	authCtx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "sb_live_growth_tier_key")
 
 	// 1. Subscribe 3 concurrent WatchCall listeners (representing CRM, Analytics, Supervisor)
 	numWatchers := 3

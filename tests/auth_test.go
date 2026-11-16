@@ -36,7 +36,18 @@ func TestAuthInterceptorRejections(t *testing.T) {
 		t.Fatalf("expected status Unauthenticated, got: %v", err)
 	}
 
-	// 3. Bidirectional Stream without API key -> Must be Unauthenticated
+	// 3. Unary RPC with attacker prefix "sb_live_attacker_unauthorized" -> Must be Unauthenticated!
+	// Proves that strings.HasPrefix wildcard backdoor is strictly eliminated.
+	attackerAuthCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_live_attacker_unauthorized")
+	_, err = h.client.GetCallSummary(attackerAuthCtx, &pb.SummaryRequest{CallId: "any_call"})
+	if err == nil {
+		t.Fatalf("expected Unauthenticated error for unregistered sb_live_ key")
+	}
+	if st, ok := status.FromError(err); !ok || st.Code() != codes.Unauthenticated {
+		t.Fatalf("expected status Unauthenticated on attacker sb_live_ prefix, got: %v", err)
+	}
+
+	// 4. Bidirectional Stream without API key -> Must be Unauthenticated
 	stream, err := h.client.StreamCall(ctx)
 	if err == nil {
 		_, recvErr := stream.Recv()
@@ -52,7 +63,7 @@ func TestAuthInterceptorRejections(t *testing.T) {
 		}
 	}
 
-	// 4. Standard Health Check probe without API key -> Must succeed with SERVING
+	// 5. Standard Health Check probe without API key -> Must succeed with SERVING
 	healthResp, err := h.health.Check(ctx, &healthpb.HealthCheckRequest{})
 	if err != nil {
 		t.Fatalf("health check probe failed unexpectedly: %v", err)
