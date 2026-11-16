@@ -2,6 +2,8 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -960,5 +962,132 @@ func TestFrameArrivingAfterGapTimeoutAbort(t *testing.T) {
 	}
 	if sumSt, isSt := status.FromError(summaryErr); !isSt || sumSt.Code() != codes.NotFound {
 		t.Fatalf("expected NotFound status code, got %v (%v)", sumSt.Code(), summaryErr)
+	}
+}
+
+func TestSpecialCharactersInTranscriptJSON(t *testing.T) {
+	h := setupTestHarness(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	authCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_test_key_123")
+	stream, err := h.client.StreamCall(authCtx)
+	if err != nil {
+		t.Fatalf("failed opening stream: %v", err)
+	}
+
+	callID := "call_special_chars_test_01"
+
+	// Speech transcript containing quotes, backslashes, newlines, tabs, and multi-byte UTF-8 emojis
+	const rawSpeechText = `Caller said: "I need help with my account \\ password!"` + "\n" + `Line 2: 🎙️✨ Status: active \t [verified]`
+	const rawFinalText = `Final summary: "Quotes", backslash \\, \nnewlines, and rocket 🚀 confirmed!`
+
+	// Send chunk 1 with raw speech text
+	err = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  1,
+		Data:      []byte("text:" + rawSpeechText),
+		IsFinal:   false,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("failed sending chunk 1: %v", err)
+	}
+
+	// Send chunk 2 as final frame with raw final summary text
+	err = stream.Send(&pb.AudioChunk{
+		CallId:    callID,
+		TenantId:  "tenant_test",
+		Sequence:  2,
+		Data:      []byte("final_text:" + rawFinalText),
+		IsFinal:   true,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("failed sending chunk 2: %v", err)
+	}
+
+	_ = stream.CloseSend()
+
+	var partialFound, finalFound bool
+	for {
+		ev, recvErr := stream.Recv()
+		if recvErr != nil {
+			break
+		}
+
+		switch ev.Type {
+		case pb.EventType_EVENT_TRANSCRIPT_PARTIAL:
+			var partial worker.PartialTranscriptEvent
+			if unmarshalErr := json.Unmarshal([]byte(ev.Payload), &partial); unmarshalErr != nil {
+				t.Fatalf("failed unmarshaling partial transcript JSON with special chars: %v\nPayload: %s", unmarshalErr, ev.Payload)
+			}
+			if partial.Text == rawSpeechText {
+				partialFound = true
+			}
+
+		case pb.EventType_EVENT_TRANSCRIPT_FINAL:
+			var finalEv worker.FinalTranscriptEvent
+			if unmarshalErr := json.Unmarshal([]byte(ev.Payload), &finalEv); unmarshalErr != nil {
+				t.Fatalf("failed unmarshaling final transcript JSON with special chars: %v\nPayload: %s", unmarshalErr, ev.Payload)
+			}
+			if finalEv.Transcript == rawFinalText {
+				finalFound = true
+			} else {
+				t.Errorf("final transcript corrupted across JSON roundtrip:\nExpected: %q\nGot:      %q", rawFinalText, finalEv.Transcript)
+			}
+		}
+	}
+
+	if !partialFound {
+		t.Fatalf("missing EVENT_TRANSCRIPT_PARTIAL event")
+	}
+	if !finalFound {
+		t.Fatalf("missing EVENT_TRANSCRIPT_FINAL event")
+	}
+}
+
+func TestTombstoneCapacityEviction(t *testing.T) {
+	abortedCalls := make(map[string]time.Time)
+	baseTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// 1. Fill the tombstone map to exact capacity (1024 entries)
+	for i := 0; i < worker.MaxAbortedTombstones; i++ {
+		cID := fmt.Sprintf("call_abort_%04d", i)
+		callTime := baseTime.Add(time.Duration(i) * time.Millisecond)
+		worker.RecordAbortedCall(abortedCalls, cID, callTime)
+	}
+
+	if len(abortedCalls) != worker.MaxAbortedTombstones {
+		t.Fatalf("expected map size %d, got %d", worker.MaxAbortedTombstones, len(abortedCalls))
+	}
+
+	// Verify call_abort_0000 (oldest) exists prior to overflow
+	if _, exists := abortedCalls["call_abort_0000"]; !exists {
+		t.Fatalf("expected oldest call_abort_0000 to exist")
+	}
+
+	// 2. Insert the 1025th entry (exceeding capacity)
+	newestTime := baseTime.Add(2000 * time.Millisecond)
+	worker.RecordAbortedCall(abortedCalls, "call_abort_overflow_newest", newestTime)
+
+	// 3. Verify capacity is still strictly capped at MaxAbortedTombstones (1024)
+	if len(abortedCalls) != worker.MaxAbortedTombstones {
+		t.Fatalf("expected bounded capacity %d after eviction, got %d", worker.MaxAbortedTombstones, len(abortedCalls))
+	}
+
+	// 4. Verify oldest entry (call_abort_0000) was evicted
+	if _, exists := abortedCalls["call_abort_0000"]; exists {
+		t.Fatalf("expected oldest entry call_abort_0000 to be evicted by FIFO/LRU timestamp eviction")
+	}
+
+	// 5. Verify newest entry exists and newer entries remain intact
+	if _, exists := abortedCalls["call_abort_overflow_newest"]; !exists {
+		t.Fatalf("expected newest overflow entry to be recorded in tombstone map")
+	}
+	if _, exists := abortedCalls["call_abort_0001"]; !exists {
+		t.Fatalf("expected second-oldest entry call_abort_0001 to remain")
 	}
 }

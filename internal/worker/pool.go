@@ -1,11 +1,14 @@
 package worker
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/yoohooshantanu/streambridge/internal/logger"
 	"github.com/yoohooshantanu/streambridge/internal/pb"
@@ -25,11 +28,31 @@ const (
 	// MaxAbortedTombstones caps worker-local memory to 1024 tombstones per worker.
 	MaxAbortedTombstones = 1024
 
-	// Pre-computed static JSON event payloads to avoid reflection and heap allocation in hot audio path
-	intentDetectedPayload   = `{"confidence":0.94,"intent":"customer_support_inquiry"}`
+	// Pre-computed static JSON event payloads for invariant event types to avoid reflection and heap allocation
+	intentDetectedPayload    = `{"confidence":0.94,"intent":"customer_support_inquiry"}`
 	positiveSentimentPayload = `{"score":0.88,"sentiment":"positive"}`
 	neutralSentimentPayload  = `{"score":0.88,"sentiment":"neutral"}`
 )
+
+// Strongly typed event payload structs for dynamic events.
+// Typed structs eliminate dynamic map allocation, interface{} boxing, and key sorting,
+// while guaranteeing RFC 8259-compliant JSON escaping for quotes, backslashes, newlines, and UTF-8 emojis.
+type PartialTranscriptEvent struct {
+	Text       string  `json:"text"`
+	Confidence float64 `json:"confidence"`
+	IsSpeaking bool    `json:"is_speaking"`
+}
+
+type FinalTranscriptEvent struct {
+	Transcript string  `json:"transcript"`
+	Confidence float64 `json:"confidence"`
+	DurationMs int64   `json:"duration_ms"`
+}
+
+type CallErrorEvent struct {
+	Error   string `json:"error"`
+	Message string `json:"message"`
+}
 
 type WorkerJob struct {
 	CallID string
@@ -102,12 +125,15 @@ func (p *AIWorkerPool) SetGapTimeout(d time.Duration) {
 }
 
 func (p *AIWorkerPool) emitCallError(callID, errCode, errMsg string) {
-	payload := fmt.Sprintf(`{"error":%q,"message":%q}`, errCode, errMsg)
+	payloadBytes, _ := json.Marshal(&CallErrorEvent{
+		Error:   errCode,
+		Message: errMsg,
+	})
 	seq := atomic.AddUint64(&p.eventSeq, 1)
 	p.router.Publish(callID, &pb.CallEvent{
 		CallId:    callID,
 		Type:      pb.EventType_EVENT_CALL_ERROR,
-		Payload:   payload,
+		Payload:   string(payloadBytes),
 		Sequence:  seq,
 		Timestamp: time.Now().UnixMilli(),
 	})
@@ -178,19 +204,8 @@ func (p *AIWorkerPool) workerLoop(workerID int) {
 					p.emitCallError(callID, "sequence_gap_timeout", fmt.Sprintf("stream stalled waiting for frame sequence %d for %v; missing frame never arrived", sess.nextExpectedSeq, p.gapTimeout))
 					delete(sessions, callID)
 
-					// Bounded tombstone insertion: evict oldest if capacity is reached
-					if len(abortedCalls) >= MaxAbortedTombstones {
-						var oldestKey string
-						var oldestTime time.Time
-						for k, t := range abortedCalls {
-							if oldestKey == "" || t.Before(oldestTime) {
-								oldestKey = k
-								oldestTime = t
-							}
-						}
-						delete(abortedCalls, oldestKey)
-					}
-					abortedCalls[callID] = now
+					// Bounded tombstone insertion: evicts oldest tombstone if capacity (1024) is reached
+					RecordAbortedCall(abortedCalls, callID, now)
 				}
 			}
 
@@ -201,6 +216,24 @@ func (p *AIWorkerPool) workerLoop(workerID int) {
 			p.dispatchJob(sessions, abortedCalls, job, workerID)
 		}
 	}
+}
+
+// RecordAbortedCall inserts a tombstone for an aborted callID.
+// If the worker-local tombstone map reaches MaxAbortedTombstones (1024), it evicts
+// the oldest recorded tombstone (FIFO/LRU timestamp eviction) so new aborts are never rejected.
+func RecordAbortedCall(abortedCalls map[string]time.Time, callID string, now time.Time) {
+	if len(abortedCalls) >= MaxAbortedTombstones {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, t := range abortedCalls {
+			if oldestKey == "" || t.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = t
+			}
+		}
+		delete(abortedCalls, oldestKey)
+	}
+	abortedCalls[callID] = now
 }
 
 func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, abortedCalls map[string]time.Time, job *WorkerJob, workerID int) {
@@ -313,15 +346,24 @@ func (p *AIWorkerPool) executeChunk(sess *callSession, chunk *pb.AudioChunk) {
 	nowMs := time.Now().UnixMilli()
 
 	// 1. ASR: emit partial transcript on chunk
-	// Formatted directly without dynamic map allocation or reflection-based JSON marshaling
-	partialPayload := fmt.Sprintf(`{"confidence":0.96,"is_speaking":%t,"text":"Speaker audio frame %d acknowledged (%d bytes)"}`,
-		!chunk.IsFinal, chunk.Sequence, len(chunk.Data))
+	// If chunk.Data provides explicit text (prefixed with "text:"), use it to allow testing arbitrary speech transcripts;
+	// otherwise generate standard audio frame acknowledgment text.
+	partialText := fmt.Sprintf("Speaker audio frame %d acknowledged (%d bytes)", chunk.Sequence, len(chunk.Data))
+	if len(chunk.Data) > 5 && bytes.HasPrefix(chunk.Data, []byte("text:")) && utf8.Valid(chunk.Data[5:]) {
+		partialText = string(chunk.Data[5:])
+	}
+
+	partialBytes, _ := json.Marshal(&PartialTranscriptEvent{
+		Text:       partialText,
+		Confidence: 0.96,
+		IsSpeaking: !chunk.IsFinal,
+	})
 
 	seq := atomic.AddUint64(&p.eventSeq, 1)
 	p.router.Publish(callID, &pb.CallEvent{
 		CallId:    callID,
 		Type:      pb.EventType_EVENT_TRANSCRIPT_PARTIAL,
-		Payload:   partialPayload,
+		Payload:   string(partialBytes),
 		Sequence:  seq,
 		Timestamp: nowMs,
 	})
@@ -350,12 +392,19 @@ func (p *AIWorkerPool) executeChunk(sess *callSession, chunk *pb.AudioChunk) {
 
 		// Final Transcript Event
 		finalText := fmt.Sprintf("Full transcribed call session consisting of %d chunks.", chunkCount)
-		finalPayload := fmt.Sprintf(`{"confidence":0.98,"duration_ms":%d,"transcript":%q}`, dur, finalText)
+		if len(chunk.Data) > 11 && bytes.HasPrefix(chunk.Data, []byte("final_text:")) && utf8.Valid(chunk.Data[11:]) {
+			finalText = string(chunk.Data[11:])
+		}
+		finalBytes, _ := json.Marshal(&FinalTranscriptEvent{
+			Transcript: finalText,
+			Confidence: 0.98,
+			DurationMs: dur,
+		})
 		fSeq := atomic.AddUint64(&p.eventSeq, 1)
 		p.router.Publish(callID, &pb.CallEvent{
 			CallId:    callID,
 			Type:      pb.EventType_EVENT_TRANSCRIPT_FINAL,
-			Payload:   finalPayload,
+			Payload:   string(finalBytes),
 			Sequence:  fSeq,
 			Timestamp: nowMs,
 		})

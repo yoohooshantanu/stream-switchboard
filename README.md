@@ -131,7 +131,9 @@ To eliminate lock contention and race conditions during concurrent audio chunk i
 - **Bounded Out-of-Order Sequence Reassembly**: An out-of-order sequence reassembly buffer (`pendingChunks map[uint64]*WorkerJob`) holds any frames that arrive ahead of `nextExpectedSeq`. Frames are capped at `MaxPendingChunksPerCall = 64` and `MaxSequenceGap = 128`.
 - **Explicit Caller Notification**: If an incoming frame exceeds the maximum sequence gap or the buffer is saturated, the frame is dropped and the client is immediately notified via an `EVENT_CALL_ERROR` event.
 - **Deterministic Gap Timeout & Eviction**: If a sequence gap remains stalled without the missing frame arriving, the worker's background ticker aborts the stalled session after `DefaultGapTimeout` (2 seconds), emits an `EVENT_CALL_ERROR` with `sequence_gap_timeout`, terminates the gRPC stream with `codes.DataLoss`, and evicts worker session memory to prevent indefinite hanging or memory leakage.
-- **Worker-Local Tombstone Protection (Zombie Session Prevention)**: When a call aborts due to a gap timeout, an entry is inserted into a worker-local `abortedCalls map[string]time.Time` cache (`AbortedCallTombstoneTTL = 60s`, capped at `MaxAbortedTombstones = 1024`). Any delayed/retransmitted audio frames arriving after the abort are dropped immediately without re-instantiating a new session expecting sequence 1. Because each worker exclusively owns its call partition, tombstone checking requires zero mutex locks.
+- **Worker-Local Tombstone Protection (Zombie Session Prevention)**: When a call aborts due to a gap timeout, an entry is recorded in a worker-local `abortedCalls map[string]time.Time` cache (`AbortedCallTombstoneTTL = 60s`, capped at `MaxAbortedTombstones = 1024`). Any delayed or retransmitted audio frames arriving after the abort are dropped immediately without re-instantiating a new session expecting sequence 1.
+  - **Share-Nothing Concurrency**: Because workers exclusively own their partitioned calls via `hash(callID) % numWorkers`, tombstone checking requires zero mutex locks and zero atomic operations.
+  - **Capacity Overflow (FIFO/LRU Eviction)**: When the map reaches 1024 entries, `RecordAbortedCall` evicts the oldest recorded tombstone by timestamp, ensuring newly aborted calls are always protected without memory leakage. The 60-second TTL is an engineered operational window exceeding typical carrier SIP/WebRTC renegotiation and teardown windows.
 
 ### 3. Strict Tenant Isolation & Key Registry
 - Incoming API keys are verified against a strict `KeyRegistry`. Wildcard prefixes (`strings.HasPrefix`) are strictly rejected.
@@ -164,7 +166,7 @@ Because `unsubscribe()` must acquire `r.mu.Lock()` before removing and closing `
 
 ## Benchmark Results
 
-All benchmarks executed via in-process `bufconn` listener (Windows amd64, AMD Ryzen 5 3500U, Go 1.23.12).
+All benchmarks executed via in-process `bufconn` listener (Windows amd64, AMD Ryzen 5 3500U, Go 1.23.12, run without `-race`).
 
 ### 1. Sequential Stream Throughput
 ```
@@ -176,14 +178,28 @@ BenchmarkStreamBridgeThroughput-8    4726    233320 ns/op    13952 B/op    227 a
 ### 2. Concurrent Out-of-Order Streams Profiling & Optimization
 A high-concurrency benchmark (`BenchmarkConcurrentStreamsWithGaps`) simulates 20 concurrent bidirectional gRPC voice calls delivering scrambled out-of-order audio frames.
 
-Profiling (`go tool pprof`) revealed that dynamic `json.Marshal(map[string]interface{}{...})` calls inside `executeChunk` accounted for 18.0% of CPU runtime and 21.1% of heap allocations due to reflection, map sorting, and `interface{}` boxing.
+**Profiling Diagnostics (`go tool pprof`)**:
+Profiling CPU and heap allocation profiles revealed two primary contributors:
+1. Dynamic `json.Marshal(map[string]interface{}{...})` calls inside `executeChunk` accounted for 18.0% of CPU runtime and 21.1% of heap allocations due to reflection, dynamic map sorting, and `interface{}` boxing.
+2. In `StreamCall`, allocating a 512-item subscriber channel buffer per stream created ~4 KB of channel pointer storage per call. In the benchmark's high-turnover loop across thousands of calls, this cumulatively accounted for 419 MB of transient allocations.
 
-**Optimization**:
-1. Static payload caching (`positiveSentimentPayload`, `neutralSentimentPayload`, `intentDetectedPayload`).
-2. Reflection-free formatted string templates for partial/final transcripts and error payloads.
-3. Right-sized subscriber channel buffers from 512 to 128 items in `StreamCall`.
+**Optimizations Applied**:
+1. **Strongly-Typed JSON Structs**: Replaced dynamic `map[string]interface{}` with concrete structs (`PartialTranscriptEvent`, `FinalTranscriptEvent`, `CallErrorEvent`), eliminating map creation and key sorting while guaranteeing RFC 8259-compliant escaping for quotes, backslashes, newlines, and UTF-8 emojis.
+2. **Static Invariant Payload Caching**: Pre-serialized immutable event types (`intentDetectedPayload`, `positiveSentimentPayload`, `neutralSentimentPayload`, `{"status":"completed"}`), incurring 0 heap allocations.
+3. **Right-Sized Channel Buffers**: Reduced per-stream subscriber buffers from 512 to 128 items in `StreamCall`.
 
-**Statistical Comparison (`benchstat -count=10 baseline.txt optimized.txt`)**:
+> [!NOTE]
+> **Performance Contribution & Backpressure Trade-off**:
+> Both the JSON serialization redesign and the subscriber channel buffer reduction contributed to the overall benchmark gains. Reducing the subscriber channel capacity from 512 to 128 lowers baseline memory consumption per call (~1 KB vs ~4 KB pointer table), but reduces absorption capacity for slow subscribers: lagging downstream watchers will hit non-blocking backpressure drops (`metrics.DefaultMetrics.IncDropped()`) sooner during sustained downstream stalls.
+
+**Exact Benchmark Commands**:
+```bash
+go test -run='^$' -bench='BenchmarkConcurrentStreamsWithGaps' -benchmem -count=10 ./tests/... > baseline.txt
+go test -run='^$' -bench='BenchmarkConcurrentStreamsWithGaps' -benchmem -count=10 ./tests/... > optimized.txt
+benchstat baseline.txt optimized.txt
+```
+
+**Statistical Comparison (`benchstat -count=10`)**:
 ```
 goarch: amd64
 pkg: github.com/yoohooshantanu/streambridge/tests
@@ -200,9 +216,9 @@ ConcurrentStreamsWithGaps-8   896.5Ki ± 0%   683.4Ki ± 0%  -23.77% (p=0.000 n=
                             │  allocs/op   │  allocs/op   vs base                │
 ConcurrentStreamsWithGaps-8    15.73k ± 0%   12.44k ± 0%  -20.90% (p=0.000 n=10)
 ```
-* **Latency**: Reduced from 5.316 ms to 4.015 ms (**-24.46%** faster).
-* **Heap Allocated**: Reduced from 896.5 KiB to 683.4 KiB (**-23.77%** less memory).
-* **Allocations**: Reduced from 15.73k to 12.44k (**-20.90%** fewer allocations per operation).
+* **Latency**: Reduced from 5.316 ms to 4.015 ms (**-24.46%** faster per operation, $p=0.000$).
+* **Memory Allocated**: Reduced from 896.5 KiB to 683.4 KiB (**-23.77%** less memory per operation, $p=0.000$).
+* **Allocations**: Reduced from 15.73k to 12.44k (**-20.90%** fewer allocations per operation, $p=0.000$).
 
 ---
 

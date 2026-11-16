@@ -114,3 +114,56 @@ func TestWatchCallFanOut(t *testing.T) {
 		t.Errorf("expected 0 subscribers remaining after unsubscription, got %d", remaining)
 	}
 }
+
+func TestSubscriberBufferSaturationBackpressureDrop(t *testing.T) {
+	h := setupTestHarness(t)
+
+	callID := "call_backpressure_test_01"
+	tenantID := "tenant_test"
+
+	// Subscribe with a small buffer of 4 items
+	const bufferCap = 4
+	ch, unsubscribe, err := h.router.SubscribeForTenant(callID, tenantID, bufferCap)
+	if err != nil {
+		t.Fatalf("failed subscribing: %v", err)
+	}
+	defer unsubscribe()
+
+	// Publish 10 events without draining channel to saturate the buffer
+	const totalEvents = 10
+	for i := 1; i <= totalEvents; i++ {
+		h.router.Publish(callID, &pb.CallEvent{
+			CallId:    callID,
+			Type:      pb.EventType_EVENT_TRANSCRIPT_PARTIAL,
+			Sequence:  uint64(i),
+			Timestamp: time.Now().UnixMilli(),
+		})
+	}
+
+	// Verify the channel contains exactly bufferCap (4) events
+	// Non-blocking drop must not stall publisher or crash
+	var receivedCount int
+	for i := 0; i < bufferCap; i++ {
+		select {
+		case ev := <-ch:
+			receivedCount++
+			if ev.Sequence != uint64(i+1) {
+				t.Errorf("expected sequence %d, got %d", i+1, ev.Sequence)
+			}
+		default:
+			t.Fatalf("expected buffered event %d, but channel was empty", i+1)
+		}
+	}
+
+	// Channel must now be empty; events 5 through 10 were dropped due to non-blocking backpressure
+	select {
+	case extra := <-ch:
+		t.Fatalf("unexpected extra event in saturated channel: seq=%d", extra.Sequence)
+	default:
+		// Expected: buffer was bounded at 4
+	}
+
+	if receivedCount != bufferCap {
+		t.Fatalf("expected exactly %d received events, got %d", bufferCap, receivedCount)
+	}
+}
