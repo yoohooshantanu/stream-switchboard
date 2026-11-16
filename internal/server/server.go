@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -31,12 +32,21 @@ func NewStreamBridgeServer(r *router.EventRouter, p *worker.AIWorkerPool) *Strea
 }
 
 // StreamCall manages bidirectional streaming between telephony client and AI workers
-func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.AudioChunk, pb.CallEvent]) error {
+func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.AudioChunk, pb.CallEvent]) (err error) {
 	metrics.DefaultMetrics.IncStream()
 	defer metrics.DefaultMetrics.DecStream()
 
 	ctx := stream.Context()
 	authTenantID, _ := interceptor.TenantFromContext(ctx)
+
+	var callLogger *slog.Logger = logger.L
+
+	defer func() {
+		if r := recover(); r != nil {
+			callLogger.Error("stream_call_panic_recovered", "panic", r)
+			err = status.Errorf(codes.Internal, "internal server error: %v", r)
+		}
+	}()
 
 	// Wait for the first chunk to establish call identity
 	firstChunk, err := stream.Recv()
@@ -60,12 +70,15 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 		firstChunk.TenantId = authTenantID
 	}
 
+	// Attach call_id and tenant_id to the logger for all operations within this call
+	callLogger = logger.L.With("call_id", callID, "tenant_id", firstChunk.TenantId)
+
 	// Register call ownership with tenant isolation
 	if regErr := s.router.RegisterCall(callID, firstChunk.TenantId); regErr != nil {
 		return regErr
 	}
 
-	logger.L.Info("bidi_stream_connected", "call_id", callID, "tenant_id", firstChunk.TenantId)
+	callLogger.Info("bidi_stream_connected")
 
 	// Subscribe to event router to receive real-time events for this call
 	eventCh, unsubscribe, subErr := s.router.SubscribeForTenant(callID, firstChunk.TenantId, 128)
@@ -95,7 +108,13 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 
 	// Goroutine A: Client Ingestion Loop (stream.Recv is exclusively called here)
 	go func() {
-		defer signalDone()
+		defer func() {
+			if r := recover(); r != nil {
+				callLogger.Error("stream_ingest_panic_recovered", "panic", r)
+				errCh <- status.Errorf(codes.Internal, "stream ingest panic: %v", r)
+			}
+			signalDone()
+		}()
 
 		for {
 			chunk, recvErr := stream.Recv()
@@ -130,28 +149,40 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 	for {
 		select {
 		case <-ctx.Done():
+			callLogger.Info("bidi_stream_context_cancelled")
 			return status.FromContextError(ctx.Err()).Err()
 
 		case err := <-errCh:
+			callLogger.Warn("bidi_stream_ingest_error", "error", err)
 			return status.Errorf(codes.Internal, "stream ingest failed: %v", err)
 
 		case event, ok := <-eventCh:
 			if !ok {
+				callLogger.Info("bidi_stream_closed_event_channel")
 				return nil
+			}
+			if event == nil {
+				callLogger.Error("nil_event_in_stream")
+				return status.Errorf(codes.Internal, "nil event in stream")
 			}
 
 			if sendErr := stream.Send(event); sendErr != nil {
-				logger.L.Warn("bidi_stream_send_failed", "call_id", callID, "error", sendErr)
+				callLogger.Warn("bidi_stream_send_failed", "error", sendErr)
 				return status.Errorf(codes.Unavailable, "failed emitting call event: %v", sendErr)
 			}
 
+			metrics.DefaultMetrics.IncEventType(event.Type.String())
+			metrics.DefaultMetrics.IncChunkOutbound(len(event.Payload))
+
 			// If unrecoverable gap timeout occurred, terminate stream with DataLoss gRPC status
 			if event.Type == pb.EventType_EVENT_CALL_ERROR && strings.Contains(event.Payload, "sequence_gap_timeout") {
+				callLogger.Warn("bidi_stream_sequence_gap_timeout_terminated")
 				return status.Errorf(codes.DataLoss, "stream error: %s", event.Payload)
 			}
 
 			// If call ended event is sent, complete the stream gracefully
 			if event.Type == pb.EventType_EVENT_CALL_ENDED {
+				callLogger.Info("bidi_stream_completed")
 				return nil
 			}
 
@@ -161,18 +192,28 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 			for {
 				select {
 				case <-ctx.Done():
+					callLogger.Info("bidi_stream_context_cancelled_during_drain")
 					return status.FromContextError(ctx.Err()).Err()
 				case event, ok := <-eventCh:
 					if !ok {
+						callLogger.Info("bidi_stream_closed_channel_drain")
 						return nil
+					}
+					if event == nil {
+						callLogger.Error("nil_event_in_stream_drain")
+						return status.Errorf(codes.Internal, "nil event in stream drain")
 					}
 					if sendErr := stream.Send(event); sendErr != nil {
 						return nil
 					}
+					metrics.DefaultMetrics.IncEventType(event.Type.String())
+					metrics.DefaultMetrics.IncChunkOutbound(len(event.Payload))
 					if event.Type == pb.EventType_EVENT_CALL_ERROR && strings.Contains(event.Payload, "sequence_gap_timeout") {
+						callLogger.Warn("bidi_stream_sequence_gap_timeout_terminated_drain")
 						return status.Errorf(codes.DataLoss, "stream error: %s", event.Payload)
 					}
 					if event.Type == pb.EventType_EVENT_CALL_ENDED {
+						callLogger.Info("bidi_stream_completed_drain")
 						return nil
 					}
 				}

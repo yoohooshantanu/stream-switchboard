@@ -3,70 +3,224 @@ package metrics
 import (
 	"fmt"
 	"net/http"
-	"sync/atomic"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// CARDINALITY SAFETY GUARANTEE:
+// Under NO circumstances may high-cardinality values such as call_id, tenant_id, or user_id
+// be used as Prometheus label dimensions. In high-throughput real-time telephony processing
+// millions of calls, dynamic IDs in labels cause catastrophic metric cardinality explosion,
+// exhaust Prometheus RAM, and cause scrape timeouts. Label dimensions in StreamBridge are
+// strictly bounded to finite enumerations: method, code, direction, event_type, worker_id.
+// High-cardinality attributes belong exclusively in structured logs and distributed tracing.
+
 type Metrics struct {
-	ActiveStreams    int64
-	ActiveWatchers   int64
-	ChunksReceived   int64
-	AudioBytesTotal  int64
-	EventsEmitted    int64
-	EventsDropped    int64
-	RPCCallsTotal    int64
-	RPCErrorsTotal   int64
-	WorkerProcessing int64
+	Registry *prometheus.Registry
+
+	ActiveStreamsGauge              prometheus.Gauge
+	ActiveWatchersGauge             prometheus.Gauge
+	WorkerQueueDepth                *prometheus.GaugeVec
+	SequenceGapTimeoutsTotal        prometheus.Counter
+	DuplicateFramesDroppedTotal     prometheus.Counter
+	LateFramesTombstoneDroppedTotal prometheus.Counter
+	AudioPacketsTotal               *prometheus.CounterVec
+	AudioBytesTotal                 *prometheus.CounterVec
+	EventsEmittedTotal              *prometheus.CounterVec
+	EventsDroppedTotal              prometheus.Counter
+	GRPCRequestsTotal               *prometheus.CounterVec
+	PacketQueueWaitHistogram        prometheus.Histogram
+	PacketProcessingHistogram       prometheus.Histogram
+	GRPCRequestDurationHistogram    *prometheus.HistogramVec
 }
 
-var DefaultMetrics = &Metrics{}
+func NewMetrics() *Metrics {
+	reg := prometheus.NewRegistry()
 
-func (m *Metrics) IncStream()           { atomic.AddInt64(&m.ActiveStreams, 1) }
-func (m *Metrics) DecStream()           { atomic.AddInt64(&m.ActiveStreams, -1) }
-func (m *Metrics) IncWatcher()          { atomic.AddInt64(&m.ActiveWatchers, 1) }
-func (m *Metrics) DecWatcher()          { atomic.AddInt64(&m.ActiveWatchers, -1) }
-func (m *Metrics) IncChunk(bytes int)   { atomic.AddInt64(&m.ChunksReceived, 1); atomic.AddInt64(&m.AudioBytesTotal, int64(bytes)) }
-func (m *Metrics) IncEvent()            { atomic.AddInt64(&m.EventsEmitted, 1) }
-func (m *Metrics) IncDropped()          { atomic.AddInt64(&m.EventsDropped, 1) }
+	// Sub-millisecond packet latency buckets: 50µs, 100µs, 250µs, 500µs, 1ms, 2.5ms, 5ms, 10ms, 25ms, 50ms, 100ms
+	packetLatencyBuckets := []float64{
+		0.00005, 0.0001, 0.00025, 0.0005, 0.001,
+		0.0025, 0.005, 0.010, 0.025, 0.050, 0.100,
+	}
+
+	// gRPC RPC latency buckets: 500µs up to 5s
+	rpcLatencyBuckets := []float64{
+		0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025,
+		0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+	}
+
+	m := &Metrics{
+		Registry: reg,
+
+		ActiveStreamsGauge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "streambridge_active_streams",
+			Help: "Current number of active bidirectional call streams",
+		}),
+
+		ActiveWatchersGauge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "streambridge_active_watchers",
+			Help: "Current number of active server-streaming watchers",
+		}),
+
+		WorkerQueueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "streambridge_worker_queue_depth",
+			Help: "Current number of buffered audio chunk jobs per worker queue",
+		}, []string{"worker_id"}),
+
+		SequenceGapTimeoutsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "streambridge_sequence_gap_timeouts_total",
+			Help: "Cumulative count of session terminations caused by missing audio frame sequence gaps exceeding timeout",
+		}),
+
+		DuplicateFramesDroppedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "streambridge_duplicate_frames_dropped_total",
+			Help: "Cumulative count of redundant audio chunks dropped due to already processed sequence numbers",
+		}),
+
+		LateFramesTombstoneDroppedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "streambridge_late_frames_tombstone_dropped_total",
+			Help: "Cumulative count of late-arriving audio chunks discarded because their session was previously aborted (tombstone)",
+		}),
+
+		AudioPacketsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "streambridge_audio_packets_total",
+			Help: "Cumulative count of audio chunks ingested or emitted",
+		}, []string{"direction"}),
+
+		AudioBytesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "streambridge_audio_bytes_total",
+			Help: "Cumulative count of audio payload bytes transferred",
+		}, []string{"direction"}),
+
+		EventsEmittedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "streambridge_events_emitted_total",
+			Help: "Cumulative count of real-time call events published",
+		}, []string{"event_type"}),
+
+		EventsDroppedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "streambridge_events_dropped_total",
+			Help: "Cumulative count of events dropped due to slow subscriber channel backpressure",
+		}),
+
+		GRPCRequestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "streambridge_grpc_requests_total",
+			Help: "Cumulative count of gRPC invocations completed",
+		}, []string{"method", "code"}),
+
+		PacketQueueWaitHistogram: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "streambridge_packet_queue_wait_seconds",
+			Help:    "Duration audio packets wait in worker channel buffer before execution begins",
+			Buckets: packetLatencyBuckets,
+		}),
+
+		PacketProcessingHistogram: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "streambridge_packet_processing_seconds",
+			Help:    "Execution duration for reassembly, sequencing, and AI inference dispatch per audio chunk",
+			Buckets: packetLatencyBuckets,
+		}),
+
+		GRPCRequestDurationHistogram: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "streambridge_grpc_request_duration_seconds",
+			Help:    "Total invocation duration of gRPC calls",
+			Buckets: rpcLatencyBuckets,
+		}, []string{"method", "code"}),
+	}
+
+	reg.MustRegister(
+		m.ActiveStreamsGauge,
+		m.ActiveWatchersGauge,
+		m.WorkerQueueDepth,
+		m.SequenceGapTimeoutsTotal,
+		m.DuplicateFramesDroppedTotal,
+		m.LateFramesTombstoneDroppedTotal,
+		m.AudioPacketsTotal,
+		m.AudioBytesTotal,
+		m.EventsEmittedTotal,
+		m.EventsDroppedTotal,
+		m.GRPCRequestsTotal,
+		m.PacketQueueWaitHistogram,
+		m.PacketProcessingHistogram,
+		m.GRPCRequestDurationHistogram,
+	)
+
+	// Pre-initialize standard label dimensions so metric descriptors and zero-values appear in exposition immediately
+	for i := 0; i < 4; i++ {
+		m.WorkerQueueDepth.WithLabelValues(fmt.Sprintf("%d", i)).Set(0)
+	}
+	m.AudioPacketsTotal.WithLabelValues("inbound")
+	m.AudioPacketsTotal.WithLabelValues("outbound")
+	m.AudioBytesTotal.WithLabelValues("inbound")
+	m.AudioBytesTotal.WithLabelValues("outbound")
+	m.EventsEmittedTotal.WithLabelValues("unknown")
+	m.GRPCRequestsTotal.WithLabelValues("unknown", "OK")
+
+	return m
+}
+
+var DefaultMetrics = NewMetrics()
+
+// Stream Lifecycle Gauges
+func (m *Metrics) IncStream()  { m.ActiveStreamsGauge.Inc() }
+func (m *Metrics) DecStream()  { m.ActiveStreamsGauge.Dec() }
+func (m *Metrics) IncWatcher() { m.ActiveWatchersGauge.Inc() }
+func (m *Metrics) DecWatcher() { m.ActiveWatchersGauge.Dec() }
+
+// Worker Queue Depth
+func (m *Metrics) SetWorkerQueueDepth(workerID int, depth float64) {
+	m.WorkerQueueDepth.WithLabelValues(fmt.Sprintf("%d", workerID)).Set(depth)
+}
+
+// Flow & Anomaly Counters
+func (m *Metrics) IncSequenceGapTimeout()        { m.SequenceGapTimeoutsTotal.Inc() }
+func (m *Metrics) IncDuplicateFrameDropped()     { m.DuplicateFramesDroppedTotal.Inc() }
+func (m *Metrics) IncLateFrameTombstoneDropped() { m.LateFramesTombstoneDroppedTotal.Inc() }
+
+func (m *Metrics) IncChunk(bytes int) {
+	m.AudioPacketsTotal.WithLabelValues("inbound").Inc()
+	m.AudioBytesTotal.WithLabelValues("inbound").Add(float64(bytes))
+}
+
+func (m *Metrics) IncChunkOutbound(bytes int) {
+	m.AudioPacketsTotal.WithLabelValues("outbound").Inc()
+	m.AudioBytesTotal.WithLabelValues("outbound").Add(float64(bytes))
+}
+
+func (m *Metrics) IncEvent() {
+	m.EventsEmittedTotal.WithLabelValues("unknown").Inc()
+}
+
+func (m *Metrics) IncEventType(eventType string) {
+	m.EventsEmittedTotal.WithLabelValues(eventType).Inc()
+}
+
+func (m *Metrics) IncDropped() {
+	m.EventsDroppedTotal.Inc()
+}
+
 func (m *Metrics) IncRPC(err bool) {
-	atomic.AddInt64(&m.RPCCallsTotal, 1)
+	code := "OK"
 	if err {
-		atomic.AddInt64(&m.RPCErrorsTotal, 1)
+		code = "Error"
 	}
+	m.GRPCRequestsTotal.WithLabelValues("unknown", code).Inc()
 }
 
+func (m *Metrics) RecordRPC(method, code string, durationSeconds float64) {
+	m.GRPCRequestsTotal.WithLabelValues(method, code).Inc()
+	m.GRPCRequestDurationHistogram.WithLabelValues(method, code).Observe(durationSeconds)
+}
+
+// Sub-millisecond Packet Latencies
+func (m *Metrics) ObservePacketQueueWait(durationSeconds float64) {
+	m.PacketQueueWaitHistogram.Observe(durationSeconds)
+}
+
+func (m *Metrics) ObservePacketProcessing(durationSeconds float64) {
+	m.PacketProcessingHistogram.Observe(durationSeconds)
+}
+
+// HTTP Handler
 func (m *Metrics) Handler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		fmt.Fprintf(w, "# HELP streambridge_active_streams Current number of active bidirectional call streams\n")
-		fmt.Fprintf(w, "# TYPE streambridge_active_streams gauge\n")
-		fmt.Fprintf(w, "streambridge_active_streams %d\n\n", atomic.LoadInt64(&m.ActiveStreams))
-
-		fmt.Fprintf(w, "# HELP streambridge_active_watchers Current number of active server-streaming watchers\n")
-		fmt.Fprintf(w, "# TYPE streambridge_active_watchers gauge\n")
-		fmt.Fprintf(w, "streambridge_active_watchers %d\n\n", atomic.LoadInt64(&m.ActiveWatchers))
-
-		fmt.Fprintf(w, "# HELP streambridge_chunks_received_total Cumulative audio chunks received\n")
-		fmt.Fprintf(w, "# TYPE streambridge_chunks_received_total counter\n")
-		fmt.Fprintf(w, "streambridge_chunks_received_total %d\n\n", atomic.LoadInt64(&m.ChunksReceived))
-
-		fmt.Fprintf(w, "# HELP streambridge_audio_bytes_total Cumulative audio payload bytes ingested\n")
-		fmt.Fprintf(w, "# TYPE streambridge_audio_bytes_total counter\n")
-		fmt.Fprintf(w, "streambridge_audio_bytes_total %d\n\n", atomic.LoadInt64(&m.AudioBytesTotal))
-
-		fmt.Fprintf(w, "# HELP streambridge_events_emitted_total Cumulative real-time events published\n")
-		fmt.Fprintf(w, "# TYPE streambridge_events_emitted_total counter\n")
-		fmt.Fprintf(w, "streambridge_events_emitted_total %d\n\n", atomic.LoadInt64(&m.EventsEmitted))
-
-		fmt.Fprintf(w, "# HELP streambridge_events_dropped_total Events dropped due to slow consumer backpressure\n")
-		fmt.Fprintf(w, "# TYPE streambridge_events_dropped_total counter\n")
-		fmt.Fprintf(w, "streambridge_events_dropped_total %d\n\n", atomic.LoadInt64(&m.EventsDropped))
-
-		fmt.Fprintf(w, "# HELP streambridge_rpc_calls_total Cumulative gRPC invocations\n")
-		fmt.Fprintf(w, "# TYPE streambridge_rpc_calls_total counter\n")
-		fmt.Fprintf(w, "streambridge_rpc_calls_total %d\n\n", atomic.LoadInt64(&m.RPCCallsTotal))
-
-		fmt.Fprintf(w, "# HELP streambridge_rpc_errors_total Cumulative gRPC invocation failures\n")
-		fmt.Fprintf(w, "# TYPE streambridge_rpc_errors_total counter\n")
-		fmt.Fprintf(w, "streambridge_rpc_errors_total %d\n", atomic.LoadInt64(&m.RPCErrorsTotal))
-	}
+	return promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{}).ServeHTTP
 }

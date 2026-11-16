@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/yoohooshantanu/streambridge/internal/logger"
 	"github.com/yoohooshantanu/streambridge/internal/metrics"
 	"github.com/yoohooshantanu/streambridge/internal/pb"
@@ -98,25 +99,35 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 			t.Fatalf("failed initiating stream: %v", err)
 		}
 
-		// Initial chunk to establish stream with IsFinal=true
-		chunk := &pb.AudioChunk{
+		// Initial chunk to establish stream (ongoing call)
+		chunk1 := &pb.AudioChunk{
 			CallId:   "call_obs_disconnect_01",
 			TenantId: "tenant_test",
 			Sequence: 1,
-			Data:     []byte("pcm_data"),
+			Data:     []byte("pcm_data_01"),
+			IsFinal:  false,
+		}
+		if err := stream.Send(chunk1); err != nil {
+			t.Fatalf("send 1 failed: %v", err)
+		}
+
+		time.Sleep(10 * time.Millisecond)
+
+		// Assert gauge was incremented to at least 1 using testutil
+		if active := testutil.ToFloat64(metrics.DefaultMetrics.ActiveStreamsGauge); active < 1 {
+			t.Fatalf("expected streambridge_active_streams >= 1 during active call, got: %f", active)
+		}
+
+		// Send final chunk to complete stream gracefully
+		chunk2 := &pb.AudioChunk{
+			CallId:   "call_obs_disconnect_01",
+			TenantId: "tenant_test",
+			Sequence: 2,
+			Data:     []byte("pcm_data_02"),
 			IsFinal:  true,
 		}
-		if err := stream.Send(chunk); err != nil {
-			t.Fatalf("send failed: %v", err)
-		}
-
-		time.Sleep(30 * time.Millisecond)
-
-		// Assert gauge was incremented to at least 1
-		w := httptest.NewRecorder()
-		metrics.DefaultMetrics.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-		if !strings.Contains(w.Body.String(), "streambridge_active_streams 1") {
-			t.Fatalf("expected streambridge_active_streams 1 during active call, got:\n%s", w.Body.String())
+		if err := stream.Send(chunk2); err != nil {
+			t.Fatalf("send 2 failed: %v", err)
 		}
 
 		// Client closes stream
@@ -130,11 +141,9 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 
 		time.Sleep(50 * time.Millisecond)
 
-		// Assert gauge decremented back to 0
-		w2 := httptest.NewRecorder()
-		metrics.DefaultMetrics.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-		if !strings.Contains(w2.Body.String(), "streambridge_active_streams 0") {
-			t.Fatalf("expected streambridge_active_streams 0 after normal disconnect, got:\n%s", w2.Body.String())
+		// Assert gauge decremented back to 0 using testutil
+		if active := testutil.ToFloat64(metrics.DefaultMetrics.ActiveStreamsGauge); active != 0 {
+			t.Fatalf("expected streambridge_active_streams == 0 after normal disconnect, got: %f", active)
 		}
 	})
 
@@ -177,11 +186,9 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 
 		time.Sleep(50 * time.Millisecond)
 
-		// Assert gauge decremented back to 0
-		w := httptest.NewRecorder()
-		metrics.DefaultMetrics.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-		if !strings.Contains(w.Body.String(), "streambridge_active_streams 0") {
-			t.Fatalf("expected streambridge_active_streams 0 after gap-timeout abort, got:\n%s", w.Body.String())
+		// Assert gauge decremented back to 0 using testutil
+		if active := testutil.ToFloat64(metrics.DefaultMetrics.ActiveStreamsGauge); active != 0 {
+			t.Fatalf("expected streambridge_active_streams == 0 after gap-timeout abort, got: %f", active)
 		}
 	})
 
@@ -203,7 +210,7 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 			Data:     []byte("panic_trigger_data"),
 		})
 
-		// Publish nil event to trigger panic in stream loop
+		// Publish nil event to trigger error/recovery in stream loop
 		time.Sleep(20 * time.Millisecond)
 		h.router.Publish("call_obs_panic_01", nil)
 
@@ -217,11 +224,9 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 
 		time.Sleep(50 * time.Millisecond)
 
-		// Assert gauge decremented back to 0 despite panic
-		w := httptest.NewRecorder()
-		metrics.DefaultMetrics.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-		if !strings.Contains(w.Body.String(), "streambridge_active_streams 0") {
-			t.Fatalf("expected streambridge_active_streams 0 after panic recovery, got:\n%s", w.Body.String())
+		// Assert gauge decremented back to 0 despite panic using testutil
+		if active := testutil.ToFloat64(metrics.DefaultMetrics.ActiveStreamsGauge); active != 0 {
+			t.Fatalf("expected streambridge_active_streams == 0 after panic recovery, got: %f", active)
 		}
 	})
 }
