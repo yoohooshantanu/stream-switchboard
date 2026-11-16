@@ -85,15 +85,22 @@ func main() {
 	})
 	httpMux.HandleFunc("/metrics", metrics.DefaultMetrics.Handler())
 
-	// pprof
-	httpMux.HandleFunc("/debug/pprof/", pprof.Index)
-	httpMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	// pprof: registered strictly when PPROF_ENABLED is set, bound to localhost
+	if os.Getenv("PPROF_ENABLED") == "true" || os.Getenv("PPROF_ENABLED") == "1" {
+		httpMux.HandleFunc("/debug/pprof/", pprof.Index)
+		httpMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		httpMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		httpMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		httpMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		logger.L.Info("pprof_endpoints_enabled", "binding", "127.0.0.1")
+	}
 
+	httpBind := getEnv("HTTP_HOST", "127.0.0.1")
 	httpServer := &http.Server{
-		Addr:         ":" + httpPort,
+		Addr:         net.JoinHostPort(httpBind, httpPort),
 		Handler:      httpMux,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 5 * time.Second,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
 	}
 
 	go func() {

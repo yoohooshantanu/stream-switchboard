@@ -300,17 +300,37 @@ func TestStructuredLoggingCarriesCallID(t *testing.T) {
 func TestCardinalitySafety1000CallsConstantSeriesCount(t *testing.T) {
 	h := setupTestHarness(t)
 
+	// Warm up with one call to initialize any lazy-registered static label vectors (e.g. event types)
+	ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "sb_test_key_123")
+	warmupStream, err := h.client.StreamCall(ctx)
+	if err == nil {
+		_ = warmupStream.Send(&pb.AudioChunk{
+			CallId:   "call_warmup",
+			TenantId: "tenant_test",
+			Sequence: 1,
+			Data:     []byte("warmup"),
+			IsFinal:  true,
+		})
+		_ = warmupStream.CloseSend()
+		for {
+			if _, err := warmupStream.Recv(); err != nil {
+				break
+			}
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+
 	// Scrape initial metrics series count
 	wInit := httptest.NewRecorder()
 	metrics.DefaultMetrics.Handler().ServeHTTP(wInit, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	initialBody := wInit.Body.String()
 
-	// Count number of metric sample lines (excluding comments and blank lines)
+	// Count number of application metric sample lines (excluding comments, blank lines, and runtime metrics)
 	countSeries := func(exposition string) int {
 		count := 0
 		for _, line := range strings.Split(exposition, "\n") {
 			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") {
+			if line != "" && !strings.HasPrefix(line, "#") && strings.HasPrefix(line, "streambridge_") {
 				count++
 			}
 		}
@@ -320,7 +340,6 @@ func TestCardinalitySafety1000CallsConstantSeriesCount(t *testing.T) {
 	initialSeriesCount := countSeries(initialBody)
 
 	// Drive 1,000 distinct call IDs through the system
-	ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "sb_test_key_123")
 	for i := 1; i <= 1000; i++ {
 		callID := fmt.Sprintf("call_cardinality_burst_%04d", i)
 		stream, err := h.client.StreamCall(ctx)

@@ -222,6 +222,167 @@ ConcurrentStreamsWithGaps-8    15.73k ± 0%   12.97k ± 0%  -17.57% (p=0.000 n=1
 
 ---
 
+## High-Concurrency Load Testing & Saturation Analysis
+
+A dedicated load generator (`cmd/loadgen`) drives realistic multi-stream bidirectional VoIP traffic (20ms PCM audio frames at 50 pps per call) across configurable concurrency steps (50, 100, 200, 400, and 800 concurrent calls) to characterize real-time streaming boundaries, queue-wait inflection points, and resource utilization.
+
+### Test Environment & Methodology Disclaimers
+* **Hardware**: AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx (4 Physical Cores, 8 Logical Processors), 8 GB RAM.
+* **Operating System**: Windows 11 Home Single Language (64-bit).
+* **Toolchain**: `go version go1.27.0 windows/amd64` (module target: `go 1.23.0`).
+* **Co-Location Disclaimer**: The load generator and the StreamBridge server were co-located on the same physical host and communicated over the local loopback interface (`127.0.0.1`). Both processes directly competed for CPU cores, Go runtime scheduler time slices, and OS network socket buffers. These benchmarks measure local process behavior under contention and make **no claims of production capacity or cloud deployment throughput**.
+* **Generator Self-Check & Timing Precision**: Frame pacing uses Windows multimedia high-resolution timer interrupt alignment (`timeBeginPeriod(1)`) to avoid Windows default 15.6ms scheduler quantum jitter. The generator tracks tick arrival lateness relative to scheduled 20ms intervals; ticks delayed >5ms advance schedule without catch-up bursting. A step is marked throttled if late ticks exceed 2% of offered packets.
+* **Run Discipline**: Stream starts are staggered over 1.5 seconds (`-stagger-window=1500ms`), the first 4 seconds of each step are discarded as warmup (`-warmup-duration=4s`), and between steps the generator waits until `streambridge_active_streams == 0`. The server binary is restarted cleanly between each of the 3 repeated benchmark runs. Metrics (p50/p95/p99 queue-wait and processing latency, memory, goroutines) are extracted directly from the server's Prometheus registry (`/metrics`), not from the client.
+
+### Load Test Commands
+```powershell
+# Build binaries
+go build -o bin/streambridge.exe ./cmd/server
+go build -o bin/loadgen.exe ./cmd/loadgen
+
+# Execute 3-run automated load test with auto-restart and pprof capture at knee
+.\bin\loadgen.exe -steps="50,100,200,400,800" -step-duration=15s -warmup-duration=4s -stagger-window=1500ms -runs=3 -auto-restart=true -profile-dir=./loadtest_profiles
+```
+
+### Aggregated Results (3 Runs, `[min - max]` Ranges)
+
+| Calls | Target PPS | Throughput (pps) | Queue Wait (p99) | Proc Time (p99) | Client RTT (p99) | Errors | RSS Memory | Goroutines | Notes |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|
+| **50** | 2,500 | 2,494 - 2,505 | 1.63ms - 1.72ms | 0.83ms - 0.90ms | 4.34ms - 12.03ms | 0 - 0 | 21.1MB - 21.6MB | 37 - 37 | Linear throughput, sub-2ms queue wait |
+| **100** | 5,000 | 4,986 - 5,010 | 0.99ms - 2.48ms | 0.87ms - 0.90ms | 6.20ms - 61.09ms | 0 - 0 | 24.0MB - 24.7MB | 37 - 37 | Linear scaling, stable worker queues |
+| **200** | 10,000 | 9,908 - 10,007 | 4.29ms - 14.44ms | 0.86ms - 0.89ms | 63.15ms - 99.91ms | 0 - 0 | 29.3MB - 30.4MB | 37 - 37 | **Knee Threshold**: Queue wait reaches 10ms boundary |
+| **400** | 20,000 | 19,097 - 19,986 | 29.61ms - 45.25ms | 0.81ms - 0.85ms | 101.49ms - 249.31ms | 0 - 0 | 38.9MB - 40.9MB | 37 - 37 | **Saturated**: Queue wait rises 30x over proc time |
+| **800** | 40,000 | 31,831 - 34,207 | 198.67ms - 300.20ms | 0.70ms - 0.77ms | 955.38ms - 2,805.48ms | 0 - 0 | 46.8MB - 64.1MB | 37 - 37 | Host CPU saturated; generator throttled |
+
+*\* Note: Knee detected between 200 and 400 concurrent calls when p99 queue wait exceeded 10ms (half the 20ms frame duration) while chunk processing execution time remained flat.*
+
+### Saturation Bottleneck Analysis (`pprof`)
+
+CPU profiling captured during sustained traffic at the saturation knee (200–400 concurrent calls) shows that packet processing execution time inside the workers remained virtually constant at 0.70ms–0.90ms, while packet queue wait time climbed steeply from 1.6ms at 50 calls to 45.2ms at 400 calls and 300ms at 800 calls. Analyzing `cpu_knee_200calls_r1.pprof` via `go tool pprof` confirms that the primary CPU consumer was gRPC framing and outbound network socket I/O (`google.golang.org/grpc/internal/transport.(*loopyWriter).run`, `internal/poll.(*FD).execIO`, and `syscall.WSASend` accounting for 28.3% of total CPU time), followed by runtime channel locking and goroutine scheduling (`runtime.semasleep`, `runtime.selectgo`, `runtime.lock2` accounting for 17.8% of CPU). Because the 4 partitioned AI workers share 4 physical CPU cores with the incoming gRPC reader goroutines and socket writers, packet arrival rates exceeding ~10,000 pps caused worker channel queues (`workerQueues[workerIdx]`) to accumulate backlogs, resulting in queue wait time escalating well before internal processing execution time degraded.
+
+### Raw Histogram Bucket Counts Appendix (Run 1)
+
+<details>
+<summary><b>Click to expand raw cumulative histogram bucket counts per concurrency step</b></summary>
+
+#### Step 1: 50 Concurrent Calls (2,500 offered pps)
+```
+Queue Wait Raw Buckets:
+  le <= 0.0001s  : 25,148
+  le <= 0.0005s  : 25,274
+  le <= 0.0010s  : 26,998
+  le <= 0.0025s  : 27,333
+  le <= 0.0050s  : 27,397
+  le <= 0.0100s  : 27,432
+  le <= 0.0250s  : 27,434
+  le <= +Inf     : 27,434
+
+Processing Raw Buckets:
+  le <= 0.0001s  : 26,426 (96.3% <= 100µs)
+  le <= 0.0005s  : 26,492
+  le <= 0.0010s  : 27,380
+  le <= 0.0025s  : 27,417
+  le <= 0.0100s  : 27,433
+  le <= +Inf     : 27,434
+```
+
+#### Step 2: 100 Concurrent Calls (5,000 offered pps)
+```
+Queue Wait Raw Buckets:
+  le <= 0.0001s  : 51,427
+  le <= 0.0005s  : 51,662
+  le <= 0.0010s  : 54,645
+  le <= 0.0025s  : 54,977
+  le <= 0.0050s  : 55,022
+  le <= 0.0100s  : 55,069
+  le <= 0.0250s  : 55,111
+  le <= +Inf     : 55,111
+
+Processing Raw Buckets:
+  le <= 0.0001s  : 53,036 (96.2% <= 100µs)
+  le <= 0.0005s  : 53,123
+  le <= 0.0010s  : 55,010
+  le <= 0.0025s  : 55,092
+  le <= 0.0100s  : 55,111
+  le <= +Inf     : 55,111
+```
+
+#### Step 3: 200 Concurrent Calls (10,000 offered pps)
+```
+Queue Wait Raw Buckets:
+  le <= 0.0001s  : 102,061
+  le <= 0.0005s  : 102,269
+  le <= 0.0010s  : 105,684
+  le <= 0.0025s  : 107,155
+  le <= 0.0050s  : 107,980
+  le <= 0.0100s  : 108,619
+  le <= 0.0250s  : 109,321
+  le <= 0.0500s  : 109,492
+  le <= +Inf     : 109,522
+
+Processing Raw Buckets:
+  le <= 0.0001s  : 106,518 (97.3% <= 100µs)
+  le <= 0.0005s  : 106,637
+  le <= 0.0010s  : 109,125
+  le <= 0.0025s  : 109,453
+  le <= 0.0100s  : 109,510
+  le <= +Inf     : 109,522
+```
+
+#### Step 4: 400 Concurrent Calls (20,000 offered pps)
+```
+Queue Wait Raw Buckets:
+  le <= 0.0001s  : 169,759
+  le <= 0.0005s  : 170,377
+  le <= 0.0010s  : 175,531
+  le <= 0.0025s  : 184,542
+  le <= 0.0050s  : 191,657
+  le <= 0.0100s  : 200,038
+  le <= 0.0250s  : 210,734
+  le <= 0.0500s  : 214,419
+  le <= 0.1000s  : 215,320
+  le <= 0.2500s  : 215,878
+  le <= +Inf     : 215,878
+
+Processing Raw Buckets:
+  le <= 0.0001s  : 212,228 (98.3% <= 100µs)
+  le <= 0.0005s  : 212,445
+  le <= 0.0010s  : 214,238
+  le <= 0.0025s  : 215,572
+  le <= 0.0100s  : 215,729
+  le <= 0.0500s  : 215,863
+  le <= +Inf     : 215,872
+```
+
+#### Step 5: 800 Concurrent Calls (40,000 offered pps)
+```
+Queue Wait Raw Buckets:
+  le <= 0.0001s  : 191,261
+  le <= 0.0005s  : 192,102
+  le <= 0.0010s  : 203,164
+  le <= 0.0025s  : 224,052
+  le <= 0.0050s  : 244,927
+  le <= 0.0100s  : 273,237
+  le <= 0.0250s  : 313,017
+  le <= 0.0500s  : 342,404
+  le <= 0.1000s  : 364,618
+  le <= 0.2500s  : 375,311
+  le <= 0.5000s  : 376,353
+  le <= +Inf     : 376,353
+
+Processing Raw Buckets:
+  le <= 0.0001s  : 371,090 (98.6% <= 100µs)
+  le <= 0.0005s  : 371,344
+  le <= 0.0010s  : 373,729
+  le <= 0.0025s  : 375,778
+  le <= 0.0100s  : 376,049
+  le <= 0.0500s  : 376,316
+  le <= +Inf     : 376,350
+```
+</details>
+
+---
+
 ## Getting Started
 
 ### Prerequisites

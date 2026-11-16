@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -38,10 +39,24 @@ type Metrics struct {
 func NewMetrics() *Metrics {
 	reg := prometheus.NewRegistry()
 
-	// Sub-millisecond packet latency buckets: 50µs, 100µs, 250µs, 500µs, 1ms, 2.5ms, 5ms, 10ms, 25ms, 50ms, 100ms
-	packetLatencyBuckets := []float64{
+	// Register official Go and Process collectors
+	reg.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
+
+	// Sub-millisecond to multi-second packet queue-wait latency buckets (50µs to 5s)
+	packetQueueWaitBuckets := []float64{
 		0.00005, 0.0001, 0.00025, 0.0005, 0.001,
 		0.0025, 0.005, 0.010, 0.025, 0.050, 0.100,
+		0.250, 0.500, 1.0, 2.5, 5.0,
+	}
+
+	// Packet processing execution latency buckets (50µs to 1s)
+	packetProcessingBuckets := []float64{
+		0.00005, 0.0001, 0.00025, 0.0005, 0.001,
+		0.0025, 0.005, 0.010, 0.025, 0.050, 0.100,
+		0.250, 0.500, 1.0,
 	}
 
 	// gRPC RPC latency buckets: 500µs up to 5s
@@ -111,13 +126,13 @@ func NewMetrics() *Metrics {
 		PacketQueueWaitHistogram: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "streambridge_packet_queue_wait_seconds",
 			Help:    "Duration audio packets wait in worker channel buffer before execution begins",
-			Buckets: packetLatencyBuckets,
+			Buckets: packetQueueWaitBuckets,
 		}),
 
 		PacketProcessingHistogram: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "streambridge_packet_processing_seconds",
 			Help:    "Execution duration for reassembly, sequencing, and AI inference dispatch per audio chunk",
-			Buckets: packetLatencyBuckets,
+			Buckets: packetProcessingBuckets,
 		}),
 
 		GRPCRequestDurationHistogram: prometheus.NewHistogramVec(prometheus.HistogramOpts{

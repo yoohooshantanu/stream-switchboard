@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -87,9 +86,16 @@ func hashCallID(callID string, numWorkers int) int {
 	if numWorkers <= 1 {
 		return 0
 	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(callID))
-	return int(h.Sum32() % uint32(numWorkers))
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	var hash uint32 = offset32
+	for i := 0; i < len(callID); i++ {
+		hash ^= uint32(callID[i])
+		hash *= prime32
+	}
+	return int(hash % uint32(numWorkers))
 }
 
 func NewAIWorkerPool(router *router.EventRouter, numWorkers, queueCapacity int) *AIWorkerPool {
