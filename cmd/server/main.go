@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"net"
 	"net/http"
 	"net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -31,14 +34,26 @@ func getEnv(key, defaultVal string) string {
 }
 
 func main() {
+	flagWorkers := flag.Int("workers", 0, "Number of AI worker goroutines")
+	flag.Parse()
+
 	grpcPort := getEnv("GRPC_PORT", "50051")
 	httpPort := getEnv("HTTP_PORT", "8083")
 
-	logger.L.Info("starting_streambridge", "grpc_port", grpcPort, "http_port", httpPort)
+	workerCount := 4
+	if *flagWorkers > 0 {
+		workerCount = *flagWorkers
+	} else if envW := os.Getenv("WORKER_POOL_SIZE"); envW != "" {
+		if n, err := strconv.Atoi(envW); err == nil && n > 0 {
+			workerCount = n
+		}
+	}
+
+	logger.L.Info("starting_streambridge", "grpc_port", grpcPort, "http_port", httpPort, "workers", workerCount)
 
 	// 1. Initialize Event Router & AI Worker Pool
 	eventRouter := router.NewEventRouter()
-	workerPool := worker.NewAIWorkerPool(eventRouter, 4, 2048)
+	workerPool := worker.NewAIWorkerPool(eventRouter, workerCount, 2048)
 	workerPool.Start()
 
 	// 2. Configure gRPC Server with Interceptor Chains
@@ -87,12 +102,14 @@ func main() {
 
 	// pprof: registered strictly when PPROF_ENABLED is set, bound to localhost
 	if os.Getenv("PPROF_ENABLED") == "true" || os.Getenv("PPROF_ENABLED") == "1" {
+		runtime.SetBlockProfileRate(10000) // sample goroutine blocking events > 10µs
+		runtime.SetMutexProfileFraction(5) // sample 1 in 5 mutex contention events
 		httpMux.HandleFunc("/debug/pprof/", pprof.Index)
 		httpMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 		httpMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 		httpMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		httpMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-		logger.L.Info("pprof_endpoints_enabled", "binding", "127.0.0.1")
+		logger.L.Info("pprof_endpoints_enabled", "binding", "127.0.0.1", "block_rate_ns", 10000, "mutex_fraction", 5)
 	}
 
 	httpBind := getEnv("HTTP_HOST", "127.0.0.1")
