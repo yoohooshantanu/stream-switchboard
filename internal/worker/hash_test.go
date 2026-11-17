@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// hashCallIDStandardFNV reflects the pre-optimization implementation allocating a new fnv.New32a hasher and []byte slice per call
+// hashCallIDStandardFNV reflects the pre-optimization implementation using fnv.New32a with interface method dispatch (0 heap allocations)
 func hashCallIDStandardFNV(callID string, numWorkers int) int {
 	if numWorkers <= 1 {
 		return 0
@@ -17,7 +17,7 @@ func hashCallIDStandardFNV(callID string, numWorkers int) int {
 	return int(h.Sum32() % uint32(numWorkers))
 }
 
-// TestHashCallIDEquivalence verifies that the inline zero-alloc FNV-1a hash matches fnv.New32a bit-for-bit
+// TestHashCallIDEquivalence verifies that the inline FNV-1a hash matches fnv.New32a bit-for-bit
 // across 10,000 random call IDs and diverse worker counts.
 func TestHashCallIDEquivalence(t *testing.T) {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))

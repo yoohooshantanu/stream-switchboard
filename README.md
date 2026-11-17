@@ -224,15 +224,15 @@ ConcurrentStreamsWithGaps-8    15.73k ± 0%   12.97k ± 0%  -17.57% (p=0.000 n=1
 
 ## High-Concurrency Load Testing & Saturation Analysis
 
-A dedicated load generator (`cmd/loadgen`) drives realistic multi-stream bidirectional VoIP traffic (20ms PCM audio frames at 50 pps per call) across configurable concurrency steps (50, 100, 200, 400, and 800 concurrent calls) to characterize real-time streaming boundaries, queue-wait inflection points, and resource utilization.
+A dedicated load generator (`cmd/loadgen`) drives realistic multi-stream bidirectional VoIP traffic (20ms PCM audio frames at 50 pps per call) across configurable concurrency steps (50, 100, 200, 400, and 800 concurrent calls) to characterize real-time streaming boundaries, enqueue-to-dequeue scheduling delays, and resource utilization.
 
 ### Test Environment & Methodology Disclaimers
 * **Hardware**: AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx (4 Physical Cores, 8 Logical Processors), 8 GB RAM.
 * **Operating System**: Windows 11 Home Single Language (64-bit).
 * **Toolchain**: `go version go1.27.0 windows/amd64` (module target: `go 1.23.0`).
 * **Co-Location Disclaimer**: The load generator and the StreamBridge server were co-located on the same physical host and communicated over the local loopback interface (`127.0.0.1`). Both processes directly competed for CPU cores, Go runtime scheduler time slices, and OS network socket buffers. These benchmarks measure local process behavior under contention and make **no claims of production capacity or cloud deployment throughput**.
-* **Generator Self-Check & Timing Precision**: Frame pacing uses Windows multimedia high-resolution timer interrupt alignment (`timeBeginPeriod(1)`) to avoid Windows default 15.6ms scheduler quantum jitter. The generator tracks tick arrival lateness relative to scheduled 20ms intervals; ticks delayed >5ms advance schedule without catch-up bursting. A step is marked throttled if late ticks exceed 2% of offered packets.
-* **Run Discipline**: Stream starts are staggered over 1.5 seconds (`-stagger-window=1500ms`), the first 4 seconds of each step are discarded as warmup (`-warmup-duration=4s`), and between steps the generator waits until `streambridge_active_streams == 0`. The server binary is restarted cleanly between each of the 3 repeated benchmark runs. Metrics (p50/p95/p99 queue-wait and processing latency, memory, goroutines) are extracted directly from the server's Prometheus registry (`/metrics`), not from the client.
+* **Generator Self-Check & Timing Precision**: Frame pacing on Windows uses multimedia high-resolution timer interrupt alignment (`timeBeginPeriod(1)`) to avoid default scheduler quantum jitter (with non-Windows fallback stubs). The generator tracks tick arrival lateness relative to scheduled 20ms intervals; ticks delayed >5ms advance schedule without catch-up bursting. A step is marked throttled if late ticks exceed 2% of offered packets.
+* **Run Discipline**: Stream starts are staggered over 1.5 seconds (`-stagger-window=1500ms`), the first 4 seconds of each step are discarded as warmup (`-warmup-duration=4s`), and between steps the generator waits until `streambridge_active_streams == 0`. The server binary is restarted cleanly between each of the 3 repeated benchmark runs. Metrics (p50/p95/p99 enqueue-to-dequeue delay and processing latency, memory, goroutines) are extracted directly from the server's Prometheus registry (`/metrics`), not from the client.
 
 ### Load Test Commands
 ```powershell
@@ -246,15 +246,19 @@ go build -o bin/loadgen.exe ./cmd/loadgen
 
 ### Aggregated Results (3 Runs, `[min - max]` Ranges)
 
-| Calls | Target PPS | Achieved PPS | Queue Wait (p99) | Proc Time (p99) | Mean Svc Time | Implied Util ($\rho$) | Client RTT (p99) | Server CPU% | Host CPU% | Mid Goroutines | Notes |
+| Calls | Target PPS | Achieved PPS | Enqueue-to-Dequeue Delay (p99, includes scheduling delay) | Proc Time (p99) | Mean Svc Time | Implied Util ($\rho$) | Client RTT (p99) | Server CPU% | Host CPU% | Mid Goroutines | Notes |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|
-| **50** | 2,500 | 2,502 - 2,505 | 1.21ms - 1.77ms | 0.82ms - 0.89ms | 18.3µs - 26.7µs | 1.1% - 1.7% | 5.18ms - 8.60ms | 71.4% - 96.4% | 60.5% - 82.3% | 137 - 137 | Linear throughput, sub-2ms queue wait |
+| **50** | 2,500 | 2,502 - 2,505 | 1.21ms - 1.77ms | 0.82ms - 0.89ms | 18.3µs - 26.7µs | 1.1% - 1.7% | 5.18ms - 8.60ms | 71.4% - 96.4% | 60.5% - 82.3% | 137 - 137 | Linear throughput, sub-2ms delay |
 | **100** | 5,000 | 5,008 - 5,011 | 1.01ms - 7.39ms | 0.83ms - 0.88ms | 19.3µs - 30.3µs | 2.4% - 3.8% | 6.92ms - 79.05ms | 114.6% - 137.1% | 75.1% - 90.5% | 236 - 237 | Linear scaling, stable worker queues |
-| **200** | 10,000 | 9,691 - 9,891 | 8.55ms - 33.98ms | 0.83ms - 0.89ms | 20.9µs - 33.5µs | 5.2% - 8.1% | 56.82ms - 214.60ms | 161.4% - 190.8% | 93.1% - 98.7% | 437 - 437 | **Knee Threshold**: Queue wait crosses 10ms; client RTT rises |
-| **400** | 20,000 | 16,331 - 20,029 | 17.35ms - 231.29ms | 0.67ms - 0.80ms | 19.8µs - 57.7µs | 9.9% - 23.5% | 75.49ms - 1,163.25ms | 150.7% - 300.7% | 99.9% - 100.0% | 837 - 837 | **Host Saturated**: Host CPU hits 100%; generator throttled |
+| **200** | 10,000 | 9,691 - 9,891 | 8.55ms - 33.98ms | 0.83ms - 0.89ms | 20.9µs - 33.5µs | 5.2% - 8.1% | 56.82ms - 214.60ms | 161.4% - 190.8% | 93.1% - 98.7% | 437 - 437 | **Knee Threshold**: Enqueue-to-dequeue delay crosses 10ms; client RTT rises |
+| **400** | 20,000 | 16,331 - 20,029 | 17.35ms - 231.29ms | 0.67ms - 0.80ms | 19.8µs - 57.7µs | 9.9% - 23.5% | 75.49ms - 1,163.25ms | 150.7% - 300.7% | 99.9% - 100.0% | 837 - 837 | **Host Saturated**: Host CPU hits 100%; scheduler starvation |
 | **800** | 40,000 | 22,202 - 38,570 | 88.10ms - 244.93ms | 0.53ms - 0.63ms | 25.2µs - 52.9µs | 24.3% - 29.4% | 180.15ms - 3,053.17ms | 162.9% - 346.4% | 99.8% - 100.0% | 1,637 - 1,637 | Severe host exhaustion; client timeouts |
 
 *\* Note: Goroutines are sampled directly from `go_goroutines` mid-step during steady-state traffic, reflecting active per-stream read/write routines scaling linearly with concurrency.*
+
+> [!IMPORTANT]
+> **Source of Enqueue-to-Dequeue Delay**:
+> Because implied worker utilization ($\rho = \frac{\text{Throughput} \times S_{\text{mean}}}{\text{numWorkers}}$) was only 5%–27% across all steps, the measured enqueue-to-dequeue delay is **not** caused by compute-heavy worker queue backlogs. Instead, this delay is mostly Go runtime scheduler and CPU starvation on a host whose CPU is 99%+ saturated by gRPC framing, network socket transit, and co-located load generation.
 
 ---
 
@@ -265,7 +269,7 @@ go build -o bin/loadgen.exe ./cmd/loadgen
 1. Client-side HTTP/2 frame buffering and gRPC transport scheduling
 2. Operating system network socket write (`WSASend`) and loopback transit
 3. Server-side gRPC ingest, stream demultiplexing, and frame validation
-4. Partitioned worker queue wait in `workerQueues[workerIdx]`
+4. Partitioned worker queue wait (enqueue-to-dequeue delay) in `workerQueues[workerIdx]`
 5. In-worker sequencing, reassembly, and JSON event formatting
 6. Event router fan-out to subscriber channels
 7. Server-side outbound response serialization (`loopyWriter.run` / `WSASend`)
@@ -273,16 +277,16 @@ go build -o bin/loadgen.exe ./cmd/loadgen
 
 #### Divergence at the Knee
 Because Client RTT captures the entire socket and transport pipeline, **a caller perceives the saturation knee significantly earlier than server-side execution metrics indicate**:
-* At **200 concurrent calls**, server-side chunk execution time remains completely flat (<1ms, mean service time ~21µs–34µs), and server worker queue wait is still near 8.5ms–34.0ms. However, client-observed RTT p99 climbs to **56.8ms–214.6ms**, crossing real-time interactive thresholds.
+* At **200 concurrent calls**, server-side chunk execution time remains completely flat (<1ms, mean service time ~21µs–34µs), and server worker enqueue-to-dequeue delay is still near 8.5ms–34.0ms. However, client-observed RTT p99 climbs to **56.8ms–214.6ms**, crossing real-time interactive thresholds.
 * At **400 concurrent calls**, host CPU reaches 100% saturation. While worker execution loops continue to process chunks in <1ms once dequeued, client RTT escalates to **75ms–1,163ms** due to socket transport contention and OS thread scheduling delays.
 
 ---
 
 ### Worker Pool Scalability Experiment (4 vs. 8 vs. 16 Workers)
 
-To determine whether the saturation knee moves with worker count, steps 200 and 400 were re-evaluated across 4, 8, and 16 worker configurations (3 repeated runs each):
+To determine how worker count affects scheduling delay under high load, steps 200 and 400 were evaluated across 4, 8, and 16 worker configurations (3 repeated runs per cell):
 
-| Config | Calls | Offered PPS | Achieved PPS | Queue Wait (p99) | Mean Svc Time | Implied Util ($\rho$) | Client RTT (p99) | Server CPU% | Host CPU% |
+| Config | Calls | Offered PPS | Achieved PPS | Enqueue-to-Dequeue Delay (p99) | Mean Svc Time | Implied Util ($\rho$) | Client RTT (p99) | Server CPU% | Host CPU% |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **4 Workers** | 200 | 10,000 | 9,934 - 10,045 | 5.17ms - 8.71ms | 21.7µs - 23.7µs | 5.5% - 5.9% | 32.95ms - 59.31ms | 191.0% - 228.5% | 91.3% - 97.2% |
 | **4 Workers** | 400 | 20,000 | 18,515 - 19,643 | 87.46ms - 158.69ms | 35.0µs - 40.3µs | 16.7% - 19.8% | 254.37ms - 265.05ms | 228.6% - 253.0% | 99.5% - 99.9% |
@@ -291,10 +295,11 @@ To determine whether the saturation knee moves with worker count, steps 200 and 
 | **16 Workers** | 200 | 10,000 | 9,901 - 10,027 | 2.41ms - 16.14ms | 20.4µs - 26.9µs | 5.1% - 6.7% | 35.21ms - 122.77ms | 166.7% - 204.2% | 89.1% - 99.2% |
 | **16 Workers** | 400 | 20,000 | 18,952 - 19,837 | 39.00ms - 47.37ms | 24.9µs - 36.3µs | 12.3% - 17.2% | 153.13ms - 203.38ms | 231.9% - 268.8% | 99.4% - 99.5% |
 
-#### Knee Shift Analysis
-Increasing the worker pool from 4 to 8 or 16 **does not significantly move the saturation knee**:
-1. **Low Worker Utilization**: Mean service time per chunk is ~18µs–40µs, meaning implied worker utilization ($\rho = \frac{\text{Throughput} \times S_{\text{mean}}}{\text{numWorkers}}$) remains low (4%–7% at 200 calls, 12%–27% at 400 calls). The workers themselves have substantial idle headroom.
-2. **Host Core & Transport Bound**: On this 4-core machine, the CPU bottleneck at $\ge 400$ calls is driven by gRPC HTTP/2 framing, socket I/O (`loopyWriter.run`, `WSASend`), and OS context switching. Because total host CPU reaches 99%–100%, adding more worker goroutines does not increase processing capacity; it slightly increases scheduler thread contention.
+#### Worker Count Scalability Observations
+1. **Reduced Queue Delay at 400 Calls**: Increasing workers from 4 to 16 reduced p99 enqueue-to-dequeue delay (4 workers: 87.46ms–158.69ms vs 16 workers: 39.00ms–47.37ms, non-overlapping ranges) and lowered client RTT p99 (4 workers: 254ms–265ms vs 16 workers: 153ms–203ms).
+2. **Saturation Persists (Host CPU 99%+)**: Despite the reduction in queue delay, increasing worker count did **not** remove saturation: host CPU remained pegged at 99.4%–99.9%, bounded by gRPC transport and socket scheduling across the 4 physical CPU cores.
+3. **8-Worker Variance**: The 8-worker results exhibited high variance across runs (queue delay 6.63ms–242.33ms; client RTT 42ms–548ms), making them too noisy to rank definitively between 4 and 16.
+4. **Thermal & Power Throttling Variance**: Across repeated test steps on this consumer laptop, dynamic CPU frequency scaling, thermal throttling, and background Windows OS scheduling introduced noticeable run-to-run variance across the 3 runs per cell.
 
 ---
 
@@ -302,16 +307,15 @@ Increasing the worker pool from 4 to 8 or 16 **does not significantly move the s
 
 Profiling was captured during sustained traffic at the saturation knee (200–400 concurrent calls) with block and mutex profiling enabled (`runtime.SetBlockProfileRate(10000)`, `runtime.SetMutexProfileFraction(5)`):
 
-* **CPU Profile (`cpu_knee_*.pprof`)**: The primary CPU consumers are gRPC HTTP/2 framing and outbound network socket I/O (`google.golang.org/grpc/internal/transport.(*loopyWriter).run`, `syscall.WSASend` accounting for ~28% of CPU), followed by runtime channel operations and goroutine scheduling (`runtime.selectgo`, `runtime.semasleep`, `runtime.lock2` accounting for ~18% of CPU).
-* **Block Profile (`block_knee_*.pprof`)**: `runtime.selectgo` accounts for 99.31% of blocking delay. Specifically, 50.17% of blocking time is in `StreamCall` waiting for downstream event fan-out or stream context cancellation, and 45.19% is in `GenericServerStream.Recv` waiting for network frame delivery.
-* **Mutex Profile (`mutex_knee_*.pprof`)**: Mutex wait delay is concentrated in gRPC stream serialization (`GenericServerStream.Send` -> `http2Server.Write` / `loopyWriter`), which accounts for ~48.6% of mutex wait time across concurrent streams. In contrast, worker pool submission and dispatch locks account for <6% of mutex wait time.
-* **Conclusion**: These diagnostic profiles are **consistent with** host CPU and network transport saturation bounding throughput and escalating queue wait time before worker execution capacity is exhausted.
+* **Block Profile (`block_knee_*.pprof`)**: `runtime.selectgo` accounted for 99.31% of blocking time in the profile. This represents **idle waiting by open streams** (specifically, 50.17% in `StreamCall` waiting on downstream event channels or stream disconnect, and 45.19% in gRPC `GenericServerStream.Recv` waiting for network frames to arrive over HTTP/2). It reflects goroutines blocked in legitimate select statements awaiting I/O rather than a lock bottleneck.
+* **Mutex Profile (`mutex_knee_*.pprof`)**: Mutex wait delay is concentrated in gRPC stream serialization (`GenericServerStream.Send` -> `http2Server.Write` / `loopyWriter`), which accounts for ~48.6% of mutex contention time across concurrent streams. In contrast, worker pool submission and dispatch locks account for <6% of mutex wait time.
+* **Conclusion**: These diagnostic observations are **consistent with the system being transport-bound**; host CPU and network transport serialization bound throughput before worker execution loops are saturated.
 
 ---
 
 ### `hashCallID` Microbenchmark & Register Inlining
 
-Partitioning incoming chunks across workers requires hashing the `call_id` string to select `workerQueues[workerIdx]`. Previously, this allocated a `hash/fnv` `hash.Hash32` interface on each chunk submission. Replacing this with an inline, unrolled 32-bit FNV-1a calculation (`hashCallIDInline`) keeps state entirely in CPU registers.
+Partitioning incoming chunks across workers requires hashing the `call_id` string to select `workerQueues[workerIdx]`. Previously, this invoked `hash/fnv` via `hash.Hash32` interface dispatch (which incurred 0 heap allocations, but had interface method call overhead). Replacing this with an inline, unrolled 32-bit FNV-1a calculation (`hashCallIDInline`) keeps state entirely in CPU registers and eliminates interface method dispatch.
 
 #### Microbenchmark Results (`go test -bench="." -benchmem`)
 ```
@@ -322,10 +326,17 @@ cpu: AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx
 BenchmarkHashCallID_Old-8      	17404849	        69.36 ns/op	       0 B/op	       0 allocs/op
 BenchmarkHashCallID_Inline-8   	37257129	        34.65 ns/op	       0 B/op	       0 allocs/op
 ```
-* **Latency**: Reduced from ~69.4 ns/op to ~34.7 ns/op (**~50% faster** per chunk submission).
-* **Allocations**: 0 B/op, 0 allocs/op in both versions (the inline version eliminates interface method dispatch overhead).
+* **Latency**: Reduced from ~69.4 ns/op to ~34.7 ns/op (~50% faster per chunk submission).
+* **Allocations**: Both implementations incur 0 B/op and 0 allocs/op; the speedup comes entirely from register-only computation and avoiding interface dispatch.
 * **Equivalence Verification**: Bit-for-bit equivalence between `hashCallID` and `fnv.New32a` was verified via `TestHashCallIDEquivalence` over 10,000 randomized call IDs across varying worker counts (1 to 64).
 * **Load Test Impact**: Because `hashCallID` is a micro-optimization on the fast path (~35ns out of ~20µs mean service time), it modestly reduces CPU instructions per chunk but does not alter the macro-level host CPU saturation knee.
+
+---
+
+### Benchmarking Limitations & Recommended Testing
+* **Single-Machine Co-Location**: The load generator and server ran on the same physical host and competed directly for CPU cores, thread scheduling, and loopback socket buffers.
+* **Caller-Latency Knee**: On this laptop (AMD Ryzen 5 3500U, 4 physical cores), the caller-perceived latency knee occurs around **100–200 concurrent calls** (~5,000–10,000 pps), well before internal worker processing execution degrades.
+* **Recommended Production Evaluation**: For realistic deployment characterization, rerun the load generator on separate dedicated Linux hosts over high-bandwidth physical networks with explicit CPU and memory container limits (e.g. Kubernetes cgroups / CFS quotas).
 
 ---
 
