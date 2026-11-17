@@ -10,13 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/yoohooshantanu/streambridge/internal/pb"
@@ -38,11 +36,13 @@ type MetricSnapshot struct {
 	EventsDropped      float64
 	Goroutines         float64
 	RSSBytes           float64
+	ProcessCPUSeconds  float64
 	QueueDepthMax      float64
 	QueueDepthAvg      float64
 	QueueWaitBuckets   map[float64]uint64
 	QueueWaitCount     uint64
 	ProcessingBuckets  map[float64]uint64
+	ProcessingSum      float64
 	ProcessingCount    uint64
 }
 
@@ -68,6 +68,9 @@ type StepResult struct {
 	ProcessingP95      float64
 	ProcessingP99      float64
 	ProcessingBuckets  map[float64]uint64
+	MeanServiceTimeSec float64
+	ImpliedWorkerUtil  float64
+	NumWorkers         int
 
 	ClientLatencyP50   float64
 	ClientLatencyP95   float64
@@ -80,6 +83,8 @@ type StepResult struct {
 
 	Goroutines         float64
 	RSSBytes           float64
+	ProcessCPUPercent  float64
+	HostCPUPercent     float64
 	QueueDepthAvg      float64
 	QueueDepthMax      float64
 
@@ -133,6 +138,8 @@ func parsePrometheusMetrics(body string) (*MetricSnapshot, error) {
 			snap.Goroutines = val
 		} else if strings.HasPrefix(metricKey, "process_resident_memory_bytes") {
 			snap.RSSBytes = val
+		} else if strings.HasPrefix(metricKey, "process_cpu_seconds_total") {
+			snap.ProcessCPUSeconds = val
 		} else if strings.HasPrefix(metricKey, "streambridge_worker_queue_depth{") {
 			queueDepths = append(queueDepths, val)
 		} else if strings.HasPrefix(metricKey, "streambridge_packet_queue_wait_seconds_bucket{") {
@@ -143,6 +150,8 @@ func parsePrometheusMetrics(body string) (*MetricSnapshot, error) {
 		} else if strings.HasPrefix(metricKey, "streambridge_packet_processing_seconds_bucket{") {
 			le := extractLE(metricKey)
 			snap.ProcessingBuckets[le] = uint64(val)
+		} else if strings.HasPrefix(metricKey, "streambridge_packet_processing_seconds_sum") {
+			snap.ProcessingSum = val
 		} else if strings.HasPrefix(metricKey, "streambridge_packet_processing_seconds_count") {
 			snap.ProcessingCount = uint64(val)
 		}
@@ -259,22 +268,6 @@ func computeBucketDeltas(startBuckets, endBuckets map[float64]uint64) (map[float
 	return deltas, infDelta
 }
 
-var (
-	modwinmm            = syscall.NewLazyDLL("winmm.dll")
-	procTimeBeginPeriod = modwinmm.NewProc("timeBeginPeriod")
-	procTimeEndPeriod   = modwinmm.NewProc("timeEndPeriod")
-)
-
-func initTimerResolution() func() {
-	if runtime.GOOS == "windows" {
-		_, _, _ = procTimeBeginPeriod.Call(1)
-		return func() {
-			_, _, _ = procTimeEndPeriod.Call(1)
-		}
-	}
-	return func() {}
-}
-
 func main() {
 	cleanupTimer := initTimerResolution()
 	defer cleanupTimer()
@@ -289,6 +282,7 @@ func main() {
 	staggerWindow := flag.Duration("stagger-window", 1500*time.Millisecond, "Ramp duration over which call start times are staggered")
 	frameInterval := flag.Duration("frame-interval", 20*time.Millisecond, "Audio chunk pacing interval (default: 20ms = 50 pps per call)")
 	numRuns := flag.Int("runs", 3, "Number of repeated test runs to report min-max ranges")
+	serverWorkers := flag.Int("workers", 4, "Number of AI workers configured in streambridge server")
 	profileDir := flag.String("profile-dir", "./loadtest_profiles", "Directory to store pprof artifacts at the knee")
 	serverCmdFlag := flag.String("server-bin", "./bin/streambridge.exe", "Path to streambridge server binary to launch/restart per run")
 	autoRestart := flag.Bool("auto-restart", false, "Automatically start/restart the server binary between runs")
@@ -332,7 +326,7 @@ func main() {
 		var srvProc *exec.Cmd
 		var srvLog *os.File
 		if *autoRestart {
-			srvProc, srvLog = startServerProcess(*serverCmdFlag)
+			srvProc, srvLog = startServerProcess(*serverCmdFlag, *serverWorkers)
 			time.Sleep(2 * time.Second)
 		}
 
@@ -354,6 +348,7 @@ func main() {
 				*warmupDuration,
 				*staggerWindow,
 				*frameInterval,
+				*serverWorkers,
 				*profileDir,
 				idx+1,
 				run,
@@ -426,7 +421,7 @@ func printRawBucketAppendix(steps []int, allRuns [][]StepResult) {
 	fmt.Println("========================================================================================================================")
 }
 
-func startServerProcess(binPath string) (*exec.Cmd, *os.File) {
+func startServerProcess(binPath string, numWorkers int) (*exec.Cmd, *os.File) {
 	absPath, err := filepath.Abs(binPath)
 	if err != nil {
 		absPath = binPath
@@ -437,6 +432,7 @@ func startServerProcess(binPath string) (*exec.Cmd, *os.File) {
 		"HTTP_PORT=8083",
 		"HTTP_HOST=127.0.0.1",
 		"PPROF_ENABLED=1",
+		fmt.Sprintf("WORKER_POOL_SIZE=%d", numWorkers),
 		"STREAMBRIDGE_API_KEY=sb_loadtest_key",
 	)
 	logFile, err := os.OpenFile("streambridge_server.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -471,6 +467,7 @@ func executeStep(
 	targetAddr, metricsURL, pprofURL, apiKey string,
 	concurrency int,
 	totalDuration, warmupDuration, staggerWindow, frameInterval time.Duration,
+	numWorkers int,
 	profileDir string,
 	stepIdx, runIdx int,
 ) (StepResult, bool) {
@@ -479,6 +476,7 @@ func executeStep(
 		Concurrency: concurrency,
 		Duration:    totalDuration,
 		OfferedPPS:  float64(concurrency) * (float64(time.Second) / float64(frameInterval)),
+		NumWorkers:  numWorkers,
 	}
 
 	// Baseline snapshot before step starts
@@ -496,14 +494,33 @@ func executeStep(
 	stopCh := make(chan struct{})
 	var wg sync.WaitGroup
 
-	// Warmup timer: after warmupDuration, record intermediate metric baseline
+	// Warmup timer: after warmupDuration, record intermediate metric baseline & host CPU baseline
 	warmupDoneCh := make(chan struct{})
 	var warmupSnap *MetricSnapshot
+	var hostStart hostCPUSnapshot
 	go func() {
 		time.Sleep(warmupDuration)
 		ws, _ := scrapeMetrics(metricsURL)
 		warmupSnap = ws
+		hostStart = getHostCPUSnapshot()
 		close(warmupDoneCh)
+	}()
+
+	// Steady-state goroutine sampler: sample go_goroutines mid-step during active traffic window
+	var steadyGoroutines float64
+	var steadySnapMu sync.Mutex
+	go func() {
+		select {
+		case <-time.After(warmupDuration + (totalDuration-warmupDuration)/2):
+			midSnap, err := scrapeMetrics(metricsURL)
+			if err == nil {
+				steadySnapMu.Lock()
+				steadyGoroutines = midSnap.Goroutines
+				steadySnapMu.Unlock()
+			}
+		case <-stopCh:
+			return
+		}
 	}()
 
 	staggerInterval := time.Duration(0)
@@ -663,6 +680,7 @@ func executeStep(
 
 	// Sustain step for totalDuration
 	time.Sleep(totalDuration)
+	hostEnd := getHostCPUSnapshot()
 	close(stopCh)
 	wg.Wait()
 	pprofWg.Wait()
@@ -715,6 +733,18 @@ func executeStep(
 	result.ProcessingP99 = computeQuantile(procDelta, procCount, 0.99)
 	result.ProcessingBuckets = procDelta
 
+	// Compute Mean Service Time and Implied Worker Utilization
+	deltaProcSum := postSnap.ProcessingSum - baseSnap.ProcessingSum
+	deltaProcCount := postSnap.ProcessingCount - baseSnap.ProcessingCount
+	if deltaProcCount > 0 {
+		result.MeanServiceTimeSec = deltaProcSum / float64(deltaProcCount)
+	} else if deltaPackets > 0 {
+		result.MeanServiceTimeSec = deltaProcSum / deltaPackets
+	}
+	if numWorkers > 0 {
+		result.ImpliedWorkerUtil = (result.ThroughputPPS * result.MeanServiceTimeSec) / float64(numWorkers)
+	}
+
 	// Compute Client-side Roundtrip Latencies
 	if len(clientLatencies) > 0 {
 		sort.Float64s(clientLatencies)
@@ -729,8 +759,24 @@ func executeStep(
 	result.TombstoneDropped = postSnap.TombstoneDropped - baseSnap.TombstoneDropped
 	result.EventsDropped = postSnap.EventsDropped - baseSnap.EventsDropped
 
-	result.Goroutines = postSnap.Goroutines
+	// Steady-state goroutine measurement
+	steadySnapMu.Lock()
+	if steadyGoroutines > 0 {
+		result.Goroutines = steadyGoroutines
+	} else {
+		result.Goroutines = postSnap.Goroutines
+	}
+	steadySnapMu.Unlock()
+
 	result.RSSBytes = postSnap.RSSBytes
+
+	// CPU utilizations
+	result.HostCPUPercent = computeHostCPUPercent(hostStart, hostEnd)
+	deltaProcCPU := postSnap.ProcessCPUSeconds - baseSnap.ProcessCPUSeconds
+	if sec > 0 {
+		result.ProcessCPUPercent = (deltaProcCPU / sec) * 100.0
+	}
+
 	result.QueueDepthAvg = postSnap.QueueDepthAvg
 	result.QueueDepthMax = postSnap.QueueDepthMax
 
@@ -769,6 +815,8 @@ func capturePprofProfiles(pprofURL, profileDir string, concurrency, stepIdx, run
 	_ = os.MkdirAll(profileDir, 0755)
 	cpuFile := filepath.Join(profileDir, fmt.Sprintf("cpu_knee_%dcalls_r%d.pprof", concurrency, runIdx))
 	heapFile := filepath.Join(profileDir, fmt.Sprintf("heap_knee_%dcalls_r%d.pprof", concurrency, runIdx))
+	blockFile := filepath.Join(profileDir, fmt.Sprintf("block_knee_%dcalls_r%d.pprof", concurrency, runIdx))
+	mutexFile := filepath.Join(profileDir, fmt.Sprintf("mutex_knee_%dcalls_r%d.pprof", concurrency, runIdx))
 
 	client := http.Client{Timeout: 15 * time.Second}
 
@@ -778,8 +826,14 @@ func capturePprofProfiles(pprofURL, profileDir string, concurrency, stepIdx, run
 		data, _ := io.ReadAll(resp.Body)
 		_ = os.WriteFile(cpuFile, data, 0644)
 		resp.Body.Close()
-	} else if resp != nil {
-		resp.Body.Close()
+		fmt.Printf("     [pprof] Captured CPU profile -> %s\n", cpuFile)
+	} else {
+		if err != nil {
+			fmt.Printf("     [!] Failed fetching CPU profile: %v\n", err)
+		} else if resp != nil {
+			fmt.Printf("     [!] CPU profile returned HTTP %d\n", resp.StatusCode)
+			resp.Body.Close()
+		}
 	}
 
 	// 2. Capture Heap profile
@@ -788,28 +842,54 @@ func capturePprofProfiles(pprofURL, profileDir string, concurrency, stepIdx, run
 		dataHeap, _ := io.ReadAll(respHeap.Body)
 		_ = os.WriteFile(heapFile, dataHeap, 0644)
 		respHeap.Body.Close()
+		fmt.Printf("     [pprof] Captured Heap profile -> %s\n", heapFile)
 	} else if respHeap != nil {
 		respHeap.Body.Close()
+	}
+
+	// 3. Capture Block profile
+	respBlock, errBlock := client.Get(pprofURL + "/block")
+	if errBlock == nil && respBlock.StatusCode == http.StatusOK {
+		dataBlock, _ := io.ReadAll(respBlock.Body)
+		_ = os.WriteFile(blockFile, dataBlock, 0644)
+		respBlock.Body.Close()
+		fmt.Printf("     [pprof] Captured Block profile -> %s\n", blockFile)
+	} else if respBlock != nil {
+		respBlock.Body.Close()
+	}
+
+	// 4. Capture Mutex profile
+	respMutex, errMutex := client.Get(pprofURL + "/mutex")
+	if errMutex == nil && respMutex.StatusCode == http.StatusOK {
+		dataMutex, _ := io.ReadAll(respMutex.Body)
+		_ = os.WriteFile(mutexFile, dataMutex, 0644)
+		respMutex.Body.Close()
+		fmt.Printf("     [pprof] Captured Mutex profile -> %s\n", mutexFile)
+	} else if respMutex != nil {
+		respMutex.Body.Close()
 	}
 
 	return true
 }
 
 func printSummaryTable(steps []int, allRuns [][]StepResult, goVersion string) {
-	fmt.Println("\n========================================================================================================================")
+	fmt.Println("\n==============================================================================================================================================================")
 	fmt.Printf(" STREAMBRIDGE LOAD TEST RESULTS - 3-RUN [MIN - MAX] AGGREGATED SUMMARY\n")
 	fmt.Printf(" Toolchain: %s\n", goVersion)
-	fmt.Println("========================================================================================================================")
-	fmt.Printf("| %-7s | %-15s | %-16s | %-16s | %-16s | %-10s | %-12s | %-10s |\n",
-		"Calls", "Throughput (pps)", "Queue Wait (p99)", "Proc Time (p99)", "Client RTT (p99)", "Errors", "RSS Memory", "Goroutines")
-	fmt.Println("|---------|-----------------|------------------|------------------|------------------|------------|--------------|------------|")
+	fmt.Println("==============================================================================================================================================================")
+	fmt.Printf("| %-5s | %-15s | %-15s | %-15s | %-14s | %-13s | %-15s | %-12s | %-10s | %-11s | %-13s |\n",
+		"Calls", "Throughput(pps)", "EnqDeqWait(p99)", "ProcTime(p99)", "MeanSvcTime", "ImpliedUtil", "ClientRTT(p99)", "ServerCPU%", "HostCPU%", "Goroutines", "RSS Memory")
+	fmt.Println("|-------|-----------------|-----------------|-----------------|----------------|---------------|-----------------|--------------|------------|-------------|---------------|")
 
 	for sIdx, c := range steps {
 		var minPPS, maxPPS float64 = math.MaxFloat64, 0
 		var minQW99, maxQW99 float64 = math.MaxFloat64, 0
 		var minProc99, maxProc99 float64 = math.MaxFloat64, 0
+		var minMeanSvc, maxMeanSvc float64 = math.MaxFloat64, 0
+		var minUtil, maxUtil float64 = math.MaxFloat64, 0
 		var minRTT99, maxRTT99 float64 = math.MaxFloat64, 0
-		var minErr, maxErr float64 = math.MaxFloat64, 0
+		var minServCPU, maxServCPU float64 = math.MaxFloat64, 0
+		var minHostCPU, maxHostCPU float64 = math.MaxFloat64, 0
 		var minRSS, maxRSS float64 = math.MaxFloat64, 0
 		var minGoro, maxGoro float64 = math.MaxFloat64, 0
 
@@ -851,6 +931,22 @@ func printSummaryTable(steps []int, allRuns [][]StepResult, goVersion string) {
 				maxProc99 = procMs
 			}
 
+			svcUs := r.MeanServiceTimeSec * 1000000
+			if svcUs < minMeanSvc {
+				minMeanSvc = svcUs
+			}
+			if svcUs > maxMeanSvc {
+				maxMeanSvc = svcUs
+			}
+
+			utilPct := r.ImpliedWorkerUtil * 100
+			if utilPct < minUtil {
+				minUtil = utilPct
+			}
+			if utilPct > maxUtil {
+				maxUtil = utilPct
+			}
+
 			rttMs := r.ClientLatencyP99 * 1000
 			if rttMs < minRTT99 {
 				minRTT99 = rttMs
@@ -859,12 +955,18 @@ func printSummaryTable(steps []int, allRuns [][]StepResult, goVersion string) {
 				maxRTT99 = rttMs
 			}
 
-			errs := r.SequenceGapErrors + r.DuplicateDropped
-			if errs < minErr {
-				minErr = errs
+			if r.ProcessCPUPercent < minServCPU {
+				minServCPU = r.ProcessCPUPercent
 			}
-			if errs > maxErr {
-				maxErr = errs
+			if r.ProcessCPUPercent > maxServCPU {
+				maxServCPU = r.ProcessCPUPercent
+			}
+
+			if r.HostCPUPercent < minHostCPU {
+				minHostCPU = r.HostCPUPercent
+			}
+			if r.HostCPUPercent > maxHostCPU {
+				maxHostCPU = r.HostCPUPercent
 			}
 
 			rssMb := r.RSSBytes / (1024 * 1024)
@@ -891,9 +993,9 @@ func printSummaryTable(steps []int, allRuns [][]StepResult, goVersion string) {
 			kneeMarker += " (generator throttled)"
 		}
 
-		fmt.Printf("| %-7d | %7.0f - %-7.0f | %6.2fms - %-6.2fms | %6.2fms - %-6.2fms | %6.2fms - %-6.2fms | %4.0f - %-4.0f | %5.1fMB - %-5.1fMB | %4.0f - %-4.0f |%s\n",
-			c, minPPS, maxPPS, minQW99, maxQW99, minProc99, maxProc99, minRTT99, maxRTT99, minErr, maxErr, minRSS, maxRSS, minGoro, maxGoro, kneeMarker)
+		fmt.Printf("| %-5d | %6.0f - %-6.0f | %5.2fms - %-5.2fms | %5.2fms - %-5.2fms | %5.1fµs - %-5.1fµs | %5.1f%% - %-5.1f%% | %5.2fms - %-5.2fms | %4.1f%% - %-4.1f%% | %4.1f%% - %-4.1f%% | %4.0f - %-4.0f | %5.1fMB - %-5.1fMB |%s\n",
+			c, minPPS, maxPPS, minQW99, maxQW99, minProc99, maxProc99, minMeanSvc, maxMeanSvc, minUtil, maxUtil, minRTT99, maxRTT99, minServCPU, maxServCPU, minHostCPU, maxHostCPU, minGoro, maxGoro, minRSS, maxRSS, kneeMarker)
 	}
-	fmt.Println("========================================================================================================================")
+	fmt.Println("==============================================================================================================================================================")
 	fmt.Println(" * Indicates knee of saturation curve detected.")
 }
