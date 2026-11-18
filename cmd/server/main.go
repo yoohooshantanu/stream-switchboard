@@ -51,12 +51,16 @@ func main() {
 
 	logger.L.Info("starting_audio-gateway", "grpc_port", grpcPort, "http_port", httpPort, "workers", workerCount)
 
-	// 1. Initialize Event Router & AI Worker Pool
+	// -------
+	// Initialize event router and actor-partitioned worker pool
+	// -------
 	eventRouter := router.NewEventRouter()
 	workerPool := worker.NewAIWorkerPool(eventRouter, workerCount, 2048)
 	workerPool.Start()
 
-	// 2. Configure gRPC Server with Interceptor Chains
+	// -------
+	// Configure gRPC server with interceptor chains
+	// -------
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
 			interceptor.UnaryAuthInterceptor,
@@ -68,14 +72,18 @@ func main() {
 		),
 	)
 
-	// Register Core AudioGateway and Standard Health Service
+	// -------
+	// Register AudioGateway and standard health services
+	// -------
 	bridgeServer := server.NewAudioGatewayServer(eventRouter, workerPool)
 	pb.RegisterAudioGatewayServer(grpcServer, bridgeServer)
 
 	healthServer := health.NewHealthServer()
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
 
-	// 3. Start gRPC Listener
+	// -------
+	// Start gRPC listener
+	// -------
 	lis, err := net.Listen("tcp", ":"+grpcPort)
 	if err != nil {
 		logger.L.Error("grpc_listen_failed", "error", err)
@@ -89,7 +97,9 @@ func main() {
 		}
 	}()
 
-	// 4. Configure HTTP Sidecar for Metrics, Healthz & pprof
+	// -------
+	// Configure HTTP sidecar for metrics, healthz, and pprof
+	// -------
 	httpMux := http.NewServeMux()
 	httpMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -127,14 +137,18 @@ func main() {
 		}
 	}()
 
-	// 5. Graceful Shutdown Coordinator
+	// -------
+	// Graceful shutdown coordinator
+	// -------
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	logger.L.Info("shutting_down_audio-gateway")
 
+	// -------
 	// Gracefully drain active gRPC streams with fallback timeout
+	// -------
 	stopped := make(chan struct{})
 	go func() {
 		grpcServer.GracefulStop()
@@ -149,11 +163,12 @@ func main() {
 		grpcServer.Stop()
 	}
 
+	// -------
 	// Drain worker queue and stop background pool
+	// -------
 	workerPool.Stop()
 	eventRouter.Close()
 
-	// Shutdown HTTP sidecar
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(ctx)

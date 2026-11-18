@@ -175,9 +175,10 @@ func (p *AIWorkerPool) Submit(job *WorkerJob) bool {
 func (p *AIWorkerPool) workerLoop(workerID int) {
 	defer p.wg.Done()
 
-	// Share-Nothing Worker State:
-	// Each worker goroutine exclusively owns the state for its partitioned callIDs.
-	// No mutex contention across workers!
+	// -------
+	// Share-nothing worker state:
+	// Each worker goroutine exclusively owns state for its partitioned call IDs (zero lock contention).
+	// -------
 	sessions := make(map[string]*callSession)
 	abortedCalls := make(map[string]time.Time)
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -288,25 +289,23 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, abortedCall
 	}
 	sess.lastActivity = time.Now()
 
-	// Handle monotonic sequencing for sequenced frames (Sequence > 0)
 	if chunk.Sequence > 0 {
-		// 1. Drop already-processed duplicate sequence
 		if chunk.Sequence < sess.nextExpectedSeq {
 			metrics.DefaultMetrics.IncDuplicateFrameDropped()
 			logger.L.Debug("ignoring_duplicate_processed_chunk", "call_id", callID, "seq", chunk.Sequence, "expected", sess.nextExpectedSeq)
 			return
 		}
 
-		// 2. Buffer out-of-order future chunks (including initial gap where seq > 1 arrives first)
+		// -------
+		// Buffer out-of-order forward chunks and enforce sequence gap/buffer limits
+		// -------
 		if chunk.Sequence > sess.nextExpectedSeq {
-			// Reject excessively large sequence gaps (protects against malformed attacks) and notify caller
 			if chunk.Sequence > sess.nextExpectedSeq+MaxSequenceGap {
 				logger.L.Warn("dropping_chunk_excessive_sequence_gap", "call_id", callID, "seq", chunk.Sequence, "expected", sess.nextExpectedSeq)
 				p.emitCallError(callID, "excessive_sequence_gap", fmt.Sprintf("chunk sequence %d exceeds max forward gap (%d frames from %d)", chunk.Sequence, MaxSequenceGap, sess.nextExpectedSeq))
 				return
 			}
 
-			// Reject frame if per-call pending buffer is saturated (protects against memory exhaustion) and notify caller
 			if len(sess.pendingChunks) >= MaxPendingChunksPerCall {
 				logger.L.Warn("dropping_chunk_pending_buffer_saturated", "call_id", callID, "seq", chunk.Sequence, "buffered", len(sess.pendingChunks))
 				p.emitCallError(callID, "pending_buffer_saturated", fmt.Sprintf("pending reassembly buffer saturated (%d frames max)", MaxPendingChunksPerCall))
@@ -326,7 +325,9 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, abortedCall
 		}
 	}
 
-	// 3. Process current chunk (matches nextExpectedSeq, or chunk.Sequence == 0)
+	// -------
+	// Process current contiguous audio frame
+	// -------
 	procStart := time.Now()
 	p.executeChunk(sess, chunk)
 	metrics.DefaultMetrics.ObservePacketProcessing(time.Since(procStart).Seconds())
@@ -337,7 +338,9 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, abortedCall
 
 	isFinalEncountered := chunk.IsFinal
 
-	// 4. Process any buffered chunks that now match contiguous sequence
+	// -------
+	// Drain buffered frames that now match contiguous sequence
+	// -------
 	for {
 		nextJob, hasNext := sess.pendingChunks[sess.nextExpectedSeq]
 		if !hasNext {
@@ -357,7 +360,6 @@ func (p *AIWorkerPool) dispatchJob(sessions map[string]*callSession, abortedCall
 		sess.gapStartTime = time.Time{}
 	}
 
-	// 5. If call completed, remove session from worker state
 	if isFinalEncountered {
 		delete(sessions, callID)
 	}

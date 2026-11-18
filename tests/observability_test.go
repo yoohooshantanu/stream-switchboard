@@ -46,7 +46,9 @@ func (b *logCaptureBuffer) Reset() {
 	b.buf.Reset()
 }
 
-// 1. Test official Prometheus metrics registration and exposition
+// -------
+// Test official Prometheus metrics registration and exposition
+// -------
 func TestPrometheusOfficialMetricsRegistered(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
@@ -88,7 +90,9 @@ func TestPrometheusOfficialMetricsRegistered(t *testing.T) {
 	}
 }
 
-// 2. Test active_streams gauge decrement on all exit paths: Normal Disconnect, Gap Timeout Abort, Panic Recovery
+// -------
+// Test active_streams gauge decrement on all exit paths: Normal Disconnect, Gap Timeout Abort, Panic Recovery
+// -------
 func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 	t.Run("NormalDisconnect", func(t *testing.T) {
 		h := setupTestHarness(t)
@@ -99,7 +103,9 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 			t.Fatalf("failed initiating stream: %v", err)
 		}
 
+		// -------
 		// Initial chunk to establish stream (ongoing call)
+		// -------
 		chunk1 := &pb.AudioChunk{
 			CallId:   "call_obs_disconnect_01",
 			TenantId: "tenant_test",
@@ -113,12 +119,13 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 
 		time.Sleep(10 * time.Millisecond)
 
-		// Assert gauge was incremented to at least 1 using testutil
 		if active := testutil.ToFloat64(metrics.DefaultMetrics.ActiveStreamsGauge); active < 1 {
 			t.Fatalf("expected audio_gateway_active_streams >= 1 during active call, got: %f", active)
 		}
 
+		// -------
 		// Send final chunk to complete stream gracefully
+		// -------
 		chunk2 := &pb.AudioChunk{
 			CallId:   "call_obs_disconnect_01",
 			TenantId: "tenant_test",
@@ -130,7 +137,6 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 			t.Fatalf("send 2 failed: %v", err)
 		}
 
-		// Client closes stream
 		_ = stream.CloseSend()
 		for {
 			_, err := stream.Recv()
@@ -141,7 +147,6 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 
 		time.Sleep(50 * time.Millisecond)
 
-		// Assert gauge decremented back to 0 using testutil
 		if active := testutil.ToFloat64(metrics.DefaultMetrics.ActiveStreamsGauge); active != 0 {
 			t.Fatalf("expected audio_gateway_active_streams == 0 after normal disconnect, got: %f", active)
 		}
@@ -157,7 +162,6 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 			t.Fatalf("failed initiating stream: %v", err)
 		}
 
-		// Send frame 1
 		_ = stream.Send(&pb.AudioChunk{
 			CallId:   "call_obs_gap_01",
 			TenantId: "tenant_test",
@@ -165,7 +169,6 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 			Data:     []byte("frame_1"),
 		})
 
-		// Send frame 3 (creating a gap for frame 2)
 		_ = stream.Send(&pb.AudioChunk{
 			CallId:   "call_obs_gap_01",
 			TenantId: "tenant_test",
@@ -173,7 +176,6 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 			Data:     []byte("frame_3"),
 		})
 
-		// Wait for gap timeout to trigger stream abort
 		for {
 			_, err := stream.Recv()
 			if err != nil {
@@ -186,7 +188,6 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 
 		time.Sleep(50 * time.Millisecond)
 
-		// Assert gauge decremented back to 0 using testutil
 		if active := testutil.ToFloat64(metrics.DefaultMetrics.ActiveStreamsGauge); active != 0 {
 			t.Fatalf("expected audio_gateway_active_streams == 0 after gap-timeout abort, got: %f", active)
 		}
@@ -196,7 +197,9 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 		h := setupTestHarness(t)
 		ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "sb_test_key_123")
 
+		// -------
 		// Force panic inside router by publishing with nil event or trigger hook
+		// -------
 		stream, err := h.client.StreamCall(ctx)
 		if err != nil {
 			t.Fatalf("failed initiating stream: %v", err)
@@ -210,11 +213,15 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 			Data:     []byte("panic_trigger_data"),
 		})
 
+		// -------
 		// Publish nil event to trigger error/recovery in stream loop
+		// -------
 		time.Sleep(20 * time.Millisecond)
 		h.router.Publish("call_obs_panic_01", nil)
 
+		// -------
 		// Stream should terminate cleanly with Internal error rather than crashing the process
+		// -------
 		for {
 			_, err := stream.Recv()
 			if err != nil {
@@ -224,14 +231,15 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 
 		time.Sleep(50 * time.Millisecond)
 
-		// Assert gauge decremented back to 0 despite panic using testutil
 		if active := testutil.ToFloat64(metrics.DefaultMetrics.ActiveStreamsGauge); active != 0 {
 			t.Fatalf("expected audio_gateway_active_streams == 0 after panic recovery, got: %f", active)
 		}
 	})
 }
 
-// 3. Test structured logging: every log line within a call carries call_id
+// -------
+// Test structured logging: every log line within a call carries call_id
+// -------
 func TestStructuredLoggingCarriesCallID(t *testing.T) {
 	logBuf := &logCaptureBuffer{}
 	handler := slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})
@@ -250,7 +258,6 @@ func TestStructuredLoggingCarriesCallID(t *testing.T) {
 		t.Fatalf("stream init failed: %v", err)
 	}
 
-	// Send 3 sequential chunks (chunk 3 is final)
 	for seq := uint64(1); seq <= 3; seq++ {
 		err := stream.Send(&pb.AudioChunk{
 			CallId:   targetCallID,
@@ -296,11 +303,15 @@ func TestStructuredLoggingCarriesCallID(t *testing.T) {
 	}
 }
 
-// 4. Test cardinality safety: drive 1000 distinct call IDs and assert series count stays constant
+// -------
+// Test cardinality safety: drive 1000 distinct call IDs and assert series count stays constant
+// -------
 func TestCardinalitySafety1000CallsConstantSeriesCount(t *testing.T) {
 	h := setupTestHarness(t)
 
+	// -------
 	// Warm up with one call to initialize any lazy-registered static label vectors (e.g. event types)
+	// -------
 	ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "sb_test_key_123")
 	warmupStream, err := h.client.StreamCall(ctx)
 	if err == nil {
@@ -325,7 +336,9 @@ func TestCardinalitySafety1000CallsConstantSeriesCount(t *testing.T) {
 	metrics.DefaultMetrics.Handler().ServeHTTP(wInit, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	initialBody := wInit.Body.String()
 
+	// -------
 	// Count number of application metric sample lines (excluding comments, blank lines, and runtime metrics)
+	// -------
 	countSeries := func(exposition string) int {
 		count := 0
 		for _, line := range strings.Split(exposition, "\n") {
@@ -339,7 +352,9 @@ func TestCardinalitySafety1000CallsConstantSeriesCount(t *testing.T) {
 
 	initialSeriesCount := countSeries(initialBody)
 
+	// -------
 	// Drive 1,000 distinct call IDs through the system
+	// -------
 	for i := 1; i <= 1000; i++ {
 		callID := fmt.Sprintf("call_cardinality_burst_%04d", i)
 		stream, err := h.client.StreamCall(ctx)
@@ -370,7 +385,9 @@ func TestCardinalitySafety1000CallsConstantSeriesCount(t *testing.T) {
 	metrics.DefaultMetrics.Handler().ServeHTTP(wAfter, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	afterBody := wAfter.Body.String()
 
-	// 1. Assert NO metric line contains call_id or tenant_id
+	// -------
+	// Assert NO metric line contains call_id or tenant_id
+	// -------
 	if strings.Contains(afterBody, "call_cardinality_burst") {
 		t.Fatalf("CARDINALITY EXPLOSION: found dynamic call_id in Prometheus metrics output:\n%s", afterBody)
 	}
@@ -378,14 +395,18 @@ func TestCardinalitySafety1000CallsConstantSeriesCount(t *testing.T) {
 		t.Fatalf("CARDINALITY EXPLOSION: found prohibited call_id or tenant_id label dimension in Prometheus metrics output:\n%s", afterBody)
 	}
 
-	// 2. Assert series count remains constant
+	// -------
+	// Assert series count remains constant
+	// -------
 	afterSeriesCount := countSeries(afterBody)
 	if afterSeriesCount != initialSeriesCount {
 		t.Fatalf("expected constant metric series count of %d after 1,000 unique calls, but got %d", initialSeriesCount, afterSeriesCount)
 	}
 }
 
-// 5. Test sub-millisecond packet latency histogram buckets
+// -------
+// Test sub-millisecond packet latency histogram buckets
+// -------
 func TestSubMillisecondPacketLatencyHistograms(t *testing.T) {
 	h := setupTestHarness(t)
 	ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "sb_test_key_123")

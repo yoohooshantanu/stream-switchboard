@@ -105,7 +105,9 @@ func TestBidirectionalStreamCall(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// -------
 	// Attach valid authentication credentials bound to tenant_acme_corp
+	// -------
 	authCtx := metadata.AppendToOutgoingContext(ctx, "x-api-key", "sb_live_acme_corp_sec99")
 
 	stream, err := h.client.StreamCall(authCtx)
@@ -116,7 +118,9 @@ func TestBidirectionalStreamCall(t *testing.T) {
 	callID := "call_test_stream_01"
 	tenantID := "tenant_acme_corp"
 
+	// -------
 	// Channel to collect received events asynchronously
+	// -------
 	eventsCh := make(chan *pb.CallEvent, 32)
 	errCh := make(chan error, 1)
 
@@ -134,7 +138,9 @@ func TestBidirectionalStreamCall(t *testing.T) {
 		}
 	}()
 
+	// -------
 	// Stream 6 audio chunks (5 regular frames, 6th is final)
+	// -------
 	totalChunks := 6
 	for i := 1; i <= totalChunks; i++ {
 		isFinal := (i == totalChunks)
@@ -171,7 +177,9 @@ func TestBidirectionalStreamCall(t *testing.T) {
 		t.Fatalf("expected call events over bidi stream, got 0")
 	}
 
+	// -------
 	// Validate presence of expected event types
+	// -------
 	hasPartial := false
 	hasFinal := false
 	hasSentiment := false
@@ -212,7 +220,9 @@ func TestBidirectionalStreamCall(t *testing.T) {
 		t.Errorf("missing EVENT_CALL_ENDED")
 	}
 
+	// -------
 	// Verify post-call aggregated summary unary RPC
+	// -------
 	summary, err := h.client.GetCallSummary(authCtx, &pb.SummaryRequest{CallId: callID})
 	if err != nil {
 		t.Fatalf("failed fetching call summary: %v", err)
@@ -253,13 +263,19 @@ func TestStreamCallContextCancellationDuringDrain(t *testing.T) {
 		t.Fatalf("failed sending chunk: %v", err)
 	}
 
+	// -------
 	// Close client send half -> triggers server doneCh branch
+	// -------
 	_ = stream.CloseSend()
 
+	// -------
 	// Immediately cancel context while in drain phase
+	// -------
 	cancel()
 
+	// -------
 	// Reading from stream must return non-nil error promptly (context canceled)
+	// -------
 	done := make(chan struct{})
 	go func() {
 		for {
@@ -288,7 +304,6 @@ func TestStreamCallEmptyCallIDRejection(t *testing.T) {
 		t.Fatalf("failed opening stream: %v", err)
 	}
 
-	// Send chunk with empty CallId
 	err = stream.Send(&pb.AudioChunk{
 		CallId:    "",
 		TenantId:  "tenant_test",
@@ -301,7 +316,9 @@ func TestStreamCallEmptyCallIDRejection(t *testing.T) {
 		t.Fatalf("failed sending initial chunk: %v", err)
 	}
 
+	// -------
 	// Receive should fail with codes.InvalidArgument
+	// -------
 	_, recvErr := stream.Recv()
 	if recvErr == nil {
 		t.Fatalf("expected error on empty call_id, got nil")
@@ -324,7 +341,9 @@ func TestTenantIsolationCrossTenantAccessBlocked(t *testing.T) {
 
 	callID := "call_tenant_isolated_42"
 
-	// 1. Tenant A starts a call
+	// -------
+	// Tenant A starts a call
+	// -------
 	streamA, err := h.client.StreamCall(tenantACtx)
 	if err != nil {
 		t.Fatalf("failed starting stream for tenant A: %v", err)
@@ -342,7 +361,6 @@ func TestTenantIsolationCrossTenantAccessBlocked(t *testing.T) {
 		t.Fatalf("tenant A failed sending initial chunk: %v", err)
 	}
 
-	// Wait for call to be registered under tenant A
 	regDeadline := time.Now().Add(2 * time.Second)
 	for {
 		tID, ok := h.router.GetCallTenant(callID)
@@ -355,7 +373,9 @@ func TestTenantIsolationCrossTenantAccessBlocked(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	// 2. Tenant B attempts to WatchCall on Tenant A's call -> Must be PermissionDenied!
+	// -------
+	// Tenant B attempts to WatchCall on Tenant A's call -> Must be PermissionDenied!
+	// -------
 	watchStreamB, err := h.client.WatchCall(tenantBCtx, &pb.WatchRequest{
 		CallId:   callID,
 		TenantId: "tenant_growth_tier",
@@ -374,7 +394,9 @@ func TestTenantIsolationCrossTenantAccessBlocked(t *testing.T) {
 		}
 	}
 
-	// 3. Tenant A finishes call with final chunk
+	// -------
+	// Tenant A finishes call with final chunk
+	// -------
 	err = streamA.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_acme_corp",
@@ -388,10 +410,11 @@ func TestTenantIsolationCrossTenantAccessBlocked(t *testing.T) {
 	}
 	_ = streamA.CloseSend()
 
-	// Wait for summary to be saved
 	time.Sleep(100 * time.Millisecond)
 
-	// 4. Tenant B attempts to GetCallSummary of Tenant A's call -> Must be PermissionDenied!
+	// -------
+	// Tenant B attempts to GetCallSummary of Tenant A's call -> Must be PermissionDenied!
+	// -------
 	_, err = h.client.GetCallSummary(tenantBCtx, &pb.SummaryRequest{CallId: callID})
 	if err == nil {
 		t.Fatalf("expected GetCallSummary to fail with PermissionDenied for cross-tenant request")
@@ -400,7 +423,9 @@ func TestTenantIsolationCrossTenantAccessBlocked(t *testing.T) {
 		t.Fatalf("expected PermissionDenied on cross-tenant summary lookup, got: %v", err)
 	}
 
-	// 5. Tenant A requests GetCallSummary -> Must succeed!
+	// -------
+	// Tenant A requests GetCallSummary -> Must succeed!
+	// -------
 	summaryA, err := h.client.GetCallSummary(tenantACtx, &pb.SummaryRequest{CallId: callID})
 	if err != nil {
 		t.Fatalf("tenant A failed retrieving own summary: %v", err)
@@ -436,7 +461,6 @@ func TestOutOfOrderChunkArrivalSequencing(t *testing.T) {
 		}
 	}()
 
-	// Send Chunk 1 (Sequence 1)
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -447,7 +471,6 @@ func TestOutOfOrderChunkArrivalSequencing(t *testing.T) {
 	})
 	time.Sleep(20 * time.Millisecond)
 
-	// Send Chunk 3 (Sequence 3, IsFinal: true) BEFORE Chunk 2!
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -458,7 +481,6 @@ func TestOutOfOrderChunkArrivalSequencing(t *testing.T) {
 	})
 	time.Sleep(30 * time.Millisecond)
 
-	// Send Chunk 2 (Sequence 2) late
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -520,7 +542,9 @@ func TestInitialSequenceGapReassembly(t *testing.T) {
 		}
 	}()
 
-	// 1. Send Sequence 2 FIRST (Stream begins with an initial gap, missing sequence 1!)
+	// -------
+	// Send Sequence 2 FIRST (Stream begins with an initial gap, missing sequence 1!)
+	// -------
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -531,7 +555,9 @@ func TestInitialSequenceGapReassembly(t *testing.T) {
 	})
 	time.Sleep(20 * time.Millisecond)
 
-	// 2. Send Sequence 3 (IsFinal: true)
+	// -------
+	// Send Sequence 3 (IsFinal: true)
+	// -------
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -542,7 +568,9 @@ func TestInitialSequenceGapReassembly(t *testing.T) {
 	})
 	time.Sleep(20 * time.Millisecond)
 
-	// 3. Send Sequence 1 LAST (Missing first chunk finally arrives)
+	// -------
+	// Send Sequence 1 LAST (Missing first chunk finally arrives)
+	// -------
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -554,11 +582,9 @@ func TestInitialSequenceGapReassembly(t *testing.T) {
 
 	_ = stream.CloseSend()
 
-	// Drain events
 	for range eventsCh {
 	}
 
-	// Verify that summary accurately captured all 3 chunks in order
 	summary, err := h.client.GetCallSummary(authCtx, &pb.SummaryRequest{CallId: callID})
 	if err != nil {
 		t.Fatalf("failed retrieving summary: %v", err)
@@ -595,7 +621,9 @@ func TestDuplicateSequenceDrop(t *testing.T) {
 		}
 	}()
 
-	// 1. Send Sequence 1 (processed)
+	// -------
+	// Send Sequence 1 (processed)
+	// -------
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -606,7 +634,9 @@ func TestDuplicateSequenceDrop(t *testing.T) {
 	})
 	time.Sleep(20 * time.Millisecond)
 
-	// 2. Re-send Sequence 1 (Duplicate: already processed! Must be dropped)
+	// -------
+	// Re-send Sequence 1 (Duplicate: already processed! Must be dropped)
+	// -------
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -617,7 +647,9 @@ func TestDuplicateSequenceDrop(t *testing.T) {
 	})
 	time.Sleep(20 * time.Millisecond)
 
-	// 3. Send Sequence 3 (Buffered, waiting for sequence 2)
+	// -------
+	// Send Sequence 3 (Buffered, waiting for sequence 2)
+	// -------
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -628,7 +660,9 @@ func TestDuplicateSequenceDrop(t *testing.T) {
 	})
 	time.Sleep(20 * time.Millisecond)
 
-	// 4. Re-send Sequence 3 (Duplicate while buffered! Must be dropped)
+	// -------
+	// Re-send Sequence 3 (Duplicate while buffered! Must be dropped)
+	// -------
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -639,7 +673,9 @@ func TestDuplicateSequenceDrop(t *testing.T) {
 	})
 	time.Sleep(20 * time.Millisecond)
 
-	// 5. Send Sequence 2 (Missing chunk: triggers contiguous processing of 2 and 3)
+	// -------
+	// Send Sequence 2 (Missing chunk: triggers contiguous processing of 2 and 3)
+	// -------
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -650,7 +686,9 @@ func TestDuplicateSequenceDrop(t *testing.T) {
 	})
 	time.Sleep(20 * time.Millisecond)
 
-	// 6. Send Sequence 4 (Final frame)
+	// -------
+	// Send Sequence 4 (Final frame)
+	// -------
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -702,8 +740,12 @@ func TestPendingChunksBufferBounds(t *testing.T) {
 		}
 	}()
 
-	// 1. Send an excessively large forward sequence gap (e.g. sequence 300 when expected is 1)
+	// -------
+	// Send an excessively large forward sequence gap (e.g. sequence 300 when expected is 1)
+	// -------
+	// -------
 	// Must be rejected/dropped by MaxSequenceGap check without crashing or corrupting state
+	// -------
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -714,8 +756,12 @@ func TestPendingChunksBufferBounds(t *testing.T) {
 	})
 	time.Sleep(10 * time.Millisecond)
 
-	// 2. Flood 70 out-of-order chunks (sequence 2 through 71) while sequence 1 is missing
+	// -------
+	// Flood 70 out-of-order chunks (sequence 2 through 71) while sequence 1 is missing
+	// -------
+	// -------
 	// MaxPendingChunksPerCall = 64, so chunks beyond 64 must be bounded and dropped
+	// -------
 	for seq := uint64(2); seq <= 71; seq++ {
 		_ = stream.Send(&pb.AudioChunk{
 			CallId:    callID,
@@ -728,7 +774,9 @@ func TestPendingChunksBufferBounds(t *testing.T) {
 	}
 	time.Sleep(30 * time.Millisecond)
 
-	// 3. Send Sequence 1 (the missing first frame)
+	// -------
+	// Send Sequence 1 (the missing first frame)
+	// -------
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -739,7 +787,9 @@ func TestPendingChunksBufferBounds(t *testing.T) {
 	})
 	time.Sleep(30 * time.Millisecond)
 
-	// 4. Send sequence 66 as final frame (contiguous after chunks 1..65)
+	// -------
+	// Send sequence 66 as final frame (contiguous after chunks 1..65)
+	// -------
 	_ = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -767,8 +817,10 @@ func TestPendingChunksBufferBounds(t *testing.T) {
 		t.Fatalf("failed retrieving summary: %v", err)
 	}
 
+	// -------
 	// Chunks processed must not exceed 1 (first) + MaxPendingChunksPerCall (64 buffered) + 1 (final) = 66
 	// Chunks 66..71 sent during flood were dropped because buffer was saturated at 64
+	// -------
 	if summary.TotalChunks > int32(worker.MaxPendingChunksPerCall+2) {
 		t.Fatalf("expected bounded chunks <= %d, got %d", worker.MaxPendingChunksPerCall+2, summary.TotalChunks)
 	}
@@ -776,7 +828,9 @@ func TestPendingChunksBufferBounds(t *testing.T) {
 
 func TestGapTimeoutSessionTermination(t *testing.T) {
 	h := setupTestHarness(t)
+	// -------
 	// Set an aggressive gap timeout for deterministic quick test
+	// -------
 	h.pool.SetGapTimeout(150 * time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -790,7 +844,9 @@ func TestGapTimeoutSessionTermination(t *testing.T) {
 
 	callID := "call_gap_timeout_test_01"
 
-	// 1. Send chunk sequence 1
+	// -------
+	// Send chunk sequence 1
+	// -------
 	if err := stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -802,7 +858,9 @@ func TestGapTimeoutSessionTermination(t *testing.T) {
 		t.Fatalf("failed sending chunk 1: %v", err)
 	}
 
-	// 2. Send chunk sequence 3 (leaving sequence 2 missing!)
+	// -------
+	// Send chunk sequence 3 (leaving sequence 2 missing!)
+	// -------
 	if err := stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -814,10 +872,14 @@ func TestGapTimeoutSessionTermination(t *testing.T) {
 		t.Fatalf("failed sending chunk 3: %v", err)
 	}
 
-	// 3. Close sending side; missing chunk 2 never arrives
+	// -------
+	// Close sending side; missing chunk 2 never arrives
+	// -------
 	_ = stream.CloseSend()
 
-	// 4. Drain events; caller must receive EVENT_CALL_ERROR and then stream termination with codes.DataLoss
+	// -------
+	// Drain events; caller must receive EVENT_CALL_ERROR and then stream termination with codes.DataLoss
+	// -------
 	var receivedErrorEvent bool
 	var finalStreamErr error
 	for {
@@ -843,7 +905,9 @@ func TestGapTimeoutSessionTermination(t *testing.T) {
 
 func TestFrameArrivingAfterGapTimeoutAbort(t *testing.T) {
 	h := setupTestHarness(t)
+	// -------
 	// Aggressive gap timeout for fast, deterministic testing
+	// -------
 	h.pool.SetGapTimeout(100 * time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -857,7 +921,9 @@ func TestFrameArrivingAfterGapTimeoutAbort(t *testing.T) {
 
 	callID := "call_post_abort_zombie_prevention_01"
 
-	// 1. Send chunk sequence 1
+	// -------
+	// Send chunk sequence 1
+	// -------
 	if err := stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -869,7 +935,9 @@ func TestFrameArrivingAfterGapTimeoutAbort(t *testing.T) {
 		t.Fatalf("failed sending chunk 1: %v", err)
 	}
 
-	// 2. Send chunk sequence 3 (sequence 2 is missing, creating a sequence gap)
+	// -------
+	// Send chunk sequence 3 (sequence 2 is missing, creating a sequence gap)
+	// -------
 	if err := stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -883,7 +951,9 @@ func TestFrameArrivingAfterGapTimeoutAbort(t *testing.T) {
 
 	_ = stream.CloseSend()
 
-	// 3. Receive events until gap timeout aborts the stream with codes.DataLoss
+	// -------
+	// Receive events until gap timeout aborts the stream with codes.DataLoss
+	// -------
 	var receivedErrorEvent bool
 	var streamErr error
 	for {
@@ -906,15 +976,21 @@ func TestFrameArrivingAfterGapTimeoutAbort(t *testing.T) {
 		t.Fatalf("expected stream to terminate with codes.DataLoss, got %v (%v)", st.Code(), streamErr)
 	}
 
-	// 4. Verify tombstone protection:
+	// -------
+	// Verify tombstone protection:
+	// -------
+	// -------
 	// Subscribe to router to verify that any late-arriving chunks do NOT emit events or resurrect state
+	// -------
 	eventCh, unsubscribe, subErr := h.router.SubscribeForTenant(callID, "tenant_test", 16)
 	if subErr != nil {
 		t.Fatalf("failed subscribing to verify tombstone: %v", subErr)
 	}
 	defer unsubscribe()
 
+	// -------
 	// Dispatch late chunks for the aborted call (e.g. sequence 2 arriving after abort, or late retransmit sequence 4)
+	// -------
 	okSubmit := h.pool.Submit(&worker.WorkerJob{
 		CallID: callID,
 		Chunk: &pb.AudioChunk{
@@ -945,17 +1021,23 @@ func TestFrameArrivingAfterGapTimeoutAbort(t *testing.T) {
 		t.Fatalf("failed submitting late chunk 4 to pool")
 	}
 
+	// -------
 	// Ensure no events were emitted for the tombstoned call
+	// -------
 	select {
 	case ev, ok := <-eventCh:
 		if ok {
 			t.Fatalf("unexpected event emitted for aborted tombstoned call: type=%v payload=%s", ev.Type, ev.Payload)
 		}
 	case <-time.After(200 * time.Millisecond):
+		// -------
 		// Expected: late chunks were safely dropped by worker tombstone filter
+		// -------
 	}
 
-	// 5. Verify no completed summary was created for the aborted session
+	// -------
+	// Verify no completed summary was created for the aborted session
+	// -------
 	_, summaryErr := h.client.GetCallSummary(authCtx, &pb.SummaryRequest{CallId: callID})
 	if summaryErr == nil {
 		t.Fatalf("expected NotFound error for aborted call summary, got success")
@@ -983,7 +1065,6 @@ func TestSpecialCharactersInTranscriptJSON(t *testing.T) {
 	const rawSpeechText = `Caller said: "I need help with my account \\ password!"` + "\n" + `Line 2: 🎙️✨ Status: active \t [verified]`
 	const rawFinalText = `Final summary: "Quotes", backslash \\, \nnewlines, and rocket 🚀 confirmed!`
 
-	// Send chunk 1 with raw speech text
 	err = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -996,7 +1077,6 @@ func TestSpecialCharactersInTranscriptJSON(t *testing.T) {
 		t.Fatalf("failed sending chunk 1: %v", err)
 	}
 
-	// Send chunk 2 as final frame with raw final summary text
 	err = stream.Send(&pb.AudioChunk{
 		CallId:    callID,
 		TenantId:  "tenant_test",
@@ -1053,7 +1133,9 @@ func TestTombstoneCapacityEviction(t *testing.T) {
 	abortedCalls := make(map[string]time.Time)
 	baseTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	// 1. Fill the tombstone map to exact capacity (1024 entries)
+	// -------
+	// Fill the tombstone map to exact capacity (1024 entries)
+	// -------
 	for i := 0; i < worker.MaxAbortedTombstones; i++ {
 		cID := fmt.Sprintf("call_abort_%04d", i)
 		callTime := baseTime.Add(time.Duration(i) * time.Millisecond)
@@ -1064,26 +1146,36 @@ func TestTombstoneCapacityEviction(t *testing.T) {
 		t.Fatalf("expected map size %d, got %d", worker.MaxAbortedTombstones, len(abortedCalls))
 	}
 
+	// -------
 	// Verify call_abort_0000 (oldest) exists prior to overflow
+	// -------
 	if _, exists := abortedCalls["call_abort_0000"]; !exists {
 		t.Fatalf("expected oldest call_abort_0000 to exist")
 	}
 
-	// 2. Insert the 1025th entry (exceeding capacity)
+	// -------
+	// Insert the 1025th entry (exceeding capacity)
+	// -------
 	newestTime := baseTime.Add(2000 * time.Millisecond)
 	worker.RecordAbortedCall(abortedCalls, "call_abort_overflow_newest", newestTime)
 
-	// 3. Verify capacity is still strictly capped at MaxAbortedTombstones (1024)
+	// -------
+	// Verify capacity is still strictly capped at MaxAbortedTombstones (1024)
+	// -------
 	if len(abortedCalls) != worker.MaxAbortedTombstones {
 		t.Fatalf("expected bounded capacity %d after eviction, got %d", worker.MaxAbortedTombstones, len(abortedCalls))
 	}
 
-	// 4. Verify oldest entry (call_abort_0000) was evicted
+	// -------
+	// Verify oldest entry (call_abort_0000) was evicted
+	// -------
 	if _, exists := abortedCalls["call_abort_0000"]; exists {
 		t.Fatalf("expected oldest entry call_abort_0000 to be evicted by FIFO/LRU timestamp eviction")
 	}
 
-	// 5. Verify newest entry exists and newer entries remain intact
+	// -------
+	// Verify newest entry exists and newer entries remain intact
+	// -------
 	if _, exists := abortedCalls["call_abort_overflow_newest"]; !exists {
 		t.Fatalf("expected newest overflow entry to be recorded in tombstone map")
 	}

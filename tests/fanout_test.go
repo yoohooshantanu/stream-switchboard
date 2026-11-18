@@ -15,10 +15,14 @@ func TestWatchCallFanOut(t *testing.T) {
 	h := setupTestHarness(t)
 
 	callID := "call_fanout_multitenant_01"
+	// -------
 	// Use growth tier credentials which authenticate as tenant_growth_tier
+	// -------
 	authCtx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "sb_live_growth_tier_key")
 
-	// 1. Subscribe 3 concurrent WatchCall listeners (representing CRM, Analytics, Supervisor)
+	// -------
+	// Subscribe 3 concurrent WatchCall listeners (representing CRM, Analytics, Supervisor)
+	// -------
 	numWatchers := 3
 	var wg sync.WaitGroup
 	watcherReceived := make([]int, numWatchers)
@@ -52,7 +56,6 @@ func TestWatchCallFanOut(t *testing.T) {
 		}()
 	}
 
-	// Poll until EventRouter has registered all 3 active subscribers
 	subDeadline := time.Now().Add(2 * time.Second)
 	for h.router.SubscriberCount(callID) < numWatchers {
 		if time.Now().After(subDeadline) {
@@ -61,13 +64,14 @@ func TestWatchCallFanOut(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	// 2. Open StreamCall and stream audio frames into the call
+	// -------
+	// Open StreamCall and stream audio frames into the call
+	// -------
 	stream, err := h.client.StreamCall(authCtx)
 	if err != nil {
 		t.Fatalf("failed opening caller stream: %v", err)
 	}
 
-	// Read stream responses in background to keep stream flow healthy
 	go func() {
 		for {
 			_, err := stream.Recv()
@@ -92,23 +96,25 @@ func TestWatchCallFanOut(t *testing.T) {
 	}
 	_ = stream.CloseSend()
 
-	// Wait briefly for all AI worker events to fan out to watchers
 	time.Sleep(100 * time.Millisecond)
 
-	// Cancel watchers to cleanly terminate their recv loops
 	for _, cancel := range watcherCancels {
 		cancel()
 	}
 	wg.Wait()
 
-	// 3. Verify all 3 watchers received the fanned out events
+	// -------
+	// Verify all 3 watchers received the fanned out events
+	// -------
 	for i := 0; i < numWatchers; i++ {
 		if watcherReceived[i] == 0 {
 			t.Errorf("watcher %d received 0 events", i)
 		}
 	}
 
-	// 4. Verify subscriber list was cleaned up in router
+	// -------
+	// Verify subscriber list was cleaned up in router
+	// -------
 	time.Sleep(20 * time.Millisecond)
 	if remaining := h.router.SubscriberCount(callID); remaining != 0 {
 		t.Errorf("expected 0 subscribers remaining after unsubscription, got %d", remaining)
@@ -140,7 +146,6 @@ func TestSubscriberBufferSaturationBackpressureDrop(t *testing.T) {
 		})
 	}
 
-	// Verify the channel contains exactly bufferCap (4) events
 	// Non-blocking drop must not stall publisher or crash
 	var receivedCount int
 	for i := 0; i < bufferCap; i++ {
@@ -155,12 +160,16 @@ func TestSubscriberBufferSaturationBackpressureDrop(t *testing.T) {
 		}
 	}
 
+	// -------
 	// Channel must now be empty; events 5 through 10 were dropped due to non-blocking backpressure
+	// -------
 	select {
 	case extra := <-ch:
 		t.Fatalf("unexpected extra event in saturated channel: seq=%d", extra.Sequence)
 	default:
+		// -------
 		// Expected: buffer was bounded at 4
+		// -------
 	}
 
 	if receivedCount != bufferCap {

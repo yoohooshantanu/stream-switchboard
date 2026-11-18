@@ -29,7 +29,6 @@ func BenchmarkAudioGatewayThroughput(b *testing.B) {
 			b.Fatalf("failed opening stream: %v", err)
 		}
 
-		// Send 3 audio frames
 		for seq := 1; seq <= 3; seq++ {
 			_ = stream.Send(&pb.AudioChunk{
 				CallId:    callID,
@@ -42,7 +41,6 @@ func BenchmarkAudioGatewayThroughput(b *testing.B) {
 		}
 		_ = stream.CloseSend()
 
-		// Drain responses
 		for {
 			_, err := stream.Recv()
 			if err == io.EOF || err != nil {
@@ -56,8 +54,10 @@ func BenchmarkConcurrentStreamsWithGaps(b *testing.B) {
 	h := setupTestHarnessBench(b)
 	ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "sb_test_key_123")
 
+	// -------
 	// Pre-generate deterministic scrambled sequence orders using fixed seed 42
 	// to isolate audio-gateway reassembly & processing overhead from RNG calls.
+	// -------
 	rnd := rand.New(rand.NewSource(42))
 	const numConcurrentCalls = 20
 	const chunksPerCall = 8
