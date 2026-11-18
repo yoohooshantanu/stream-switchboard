@@ -1,11 +1,11 @@
 version: '3.8'
 
 services:
-  streambridge:
+  audio-gateway:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: streambridge
+    container_name: audio-gateway
     ports:
       - "50051:50051" # gRPC gateway
       - "8083:8083"   # HTTP healthz & Prometheus metrics
@@ -14,7 +14,7 @@ services:
       - HTTP_PORT=8083
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "/streambridge", "-healthcheck"]
+      test: ["CMD", "/audio-gateway", "-healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 3

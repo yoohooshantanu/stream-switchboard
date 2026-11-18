@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoohooshantanu/streambridge/internal/pb"
+	"github.com/yoohooshantanu/audio-gateway/internal/pb"
 	"google.golang.org/grpc/metadata"
 )
 

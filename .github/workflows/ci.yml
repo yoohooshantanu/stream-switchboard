@@ -1,4 +1,4 @@
-name: StreamBridge CI
+name: AudioGateway CI
 
 on:
   push:
@@ -27,5 +27,5 @@ jobs:
       - name: Run Hermetic Unit & Integration Tests (-race)
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./tests/...
 
-      - name: Build StreamBridge Server Binary
-        run: CGO_ENABLED=0 go build -v -o bin/streambridge ./cmd/server
+      - name: Build AudioGateway Server Binary
+        run: CGO_ENABLED=0 go build -v -o bin/audio-gateway ./cmd/server

@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.34.2
 // 	protoc        v5.27.1
-// source: streambridge.proto
+// source: audio_gateway.proto
 
 package pb
 
@@ -62,11 +62,11 @@ func (x EventType) String() string {
 }
 
 func (EventType) Descriptor() protoreflect.EnumDescriptor {
-	return file_streambridge_proto_enumTypes[0].Descriptor()
+	return file_audio_gateway_proto_enumTypes[0].Descriptor()
 }
 
 func (EventType) Type() protoreflect.EnumType {
-	return &file_streambridge_proto_enumTypes[0]
+	return &file_audio_gateway_proto_enumTypes[0]
 }
 
 func (x EventType) Number() protoreflect.EnumNumber {
@@ -74,7 +74,7 @@ func (x EventType) Number() protoreflect.EnumNumber {
 }
 
 func (EventType) EnumDescriptor() ([]byte, []int) {
-	return file_streambridge_proto_rawDescGZIP(), []int{0}
+	return file_audio_gateway_proto_rawDescGZIP(), []int{0}
 }
 
 // AudioChunk represents a chunk of streamed audio payload
@@ -94,7 +94,7 @@ type AudioChunk struct {
 func (x *AudioChunk) Reset() {
 	*x = AudioChunk{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_streambridge_proto_msgTypes[0]
+		mi := &file_audio_gateway_proto_msgTypes[0]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -107,7 +107,7 @@ func (x *AudioChunk) String() string {
 func (*AudioChunk) ProtoMessage() {}
 
 func (x *AudioChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_streambridge_proto_msgTypes[0]
+	mi := &file_audio_gateway_proto_msgTypes[0]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -119,7 +119,7 @@ func (x *AudioChunk) ProtoReflect() protoreflect.Message {
 }
 
 func (*AudioChunk) Descriptor() ([]byte, []int) {
-	return file_streambridge_proto_rawDescGZIP(), []int{0}
+	return file_audio_gateway_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *AudioChunk) GetCallId() string {
@@ -171,7 +171,7 @@ type CallEvent struct {
 	unknownFields protoimpl.UnknownFields
 
 	CallId    string    `protobuf:"bytes,1,opt,name=call_id,json=callId,proto3" json:"call_id,omitempty"`
-	Type      EventType `protobuf:"varint,2,opt,name=type,proto3,enum=streambridge.v1.EventType" json:"type,omitempty"`
+	Type      EventType `protobuf:"varint,2,opt,name=type,proto3,enum=audio-gateway.v1.EventType" json:"type,omitempty"`
 	Payload   string    `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
 	Sequence  uint64    `protobuf:"varint,4,opt,name=sequence,proto3" json:"sequence,omitempty"`
 	Timestamp int64     `protobuf:"varint,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
@@ -180,7 +180,7 @@ type CallEvent struct {
 func (x *CallEvent) Reset() {
 	*x = CallEvent{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_streambridge_proto_msgTypes[1]
+		mi := &file_audio_gateway_proto_msgTypes[1]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -193,7 +193,7 @@ func (x *CallEvent) String() string {
 func (*CallEvent) ProtoMessage() {}
 
 func (x *CallEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_streambridge_proto_msgTypes[1]
+	mi := &file_audio_gateway_proto_msgTypes[1]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -205,7 +205,7 @@ func (x *CallEvent) ProtoReflect() protoreflect.Message {
 }
 
 func (*CallEvent) Descriptor() ([]byte, []int) {
-	return file_streambridge_proto_rawDescGZIP(), []int{1}
+	return file_audio_gateway_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *CallEvent) GetCallId() string {
@@ -257,7 +257,7 @@ type WatchRequest struct {
 func (x *WatchRequest) Reset() {
 	*x = WatchRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_streambridge_proto_msgTypes[2]
+		mi := &file_audio_gateway_proto_msgTypes[2]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -270,7 +270,7 @@ func (x *WatchRequest) String() string {
 func (*WatchRequest) ProtoMessage() {}
 
 func (x *WatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_streambridge_proto_msgTypes[2]
+	mi := &file_audio_gateway_proto_msgTypes[2]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -282,7 +282,7 @@ func (x *WatchRequest) ProtoReflect() protoreflect.Message {
 }
 
 func (*WatchRequest) Descriptor() ([]byte, []int) {
-	return file_streambridge_proto_rawDescGZIP(), []int{2}
+	return file_audio_gateway_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *WatchRequest) GetCallId() string {
@@ -318,7 +318,7 @@ type SummaryRequest struct {
 func (x *SummaryRequest) Reset() {
 	*x = SummaryRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_streambridge_proto_msgTypes[3]
+		mi := &file_audio_gateway_proto_msgTypes[3]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -331,7 +331,7 @@ func (x *SummaryRequest) String() string {
 func (*SummaryRequest) ProtoMessage() {}
 
 func (x *SummaryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_streambridge_proto_msgTypes[3]
+	mi := &file_audio_gateway_proto_msgTypes[3]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -343,7 +343,7 @@ func (x *SummaryRequest) ProtoReflect() protoreflect.Message {
 }
 
 func (*SummaryRequest) Descriptor() ([]byte, []int) {
-	return file_streambridge_proto_rawDescGZIP(), []int{3}
+	return file_audio_gateway_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *SummaryRequest) GetCallId() string {
@@ -371,7 +371,7 @@ type CallSummary struct {
 func (x *CallSummary) Reset() {
 	*x = CallSummary{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_streambridge_proto_msgTypes[4]
+		mi := &file_audio_gateway_proto_msgTypes[4]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -384,7 +384,7 @@ func (x *CallSummary) String() string {
 func (*CallSummary) ProtoMessage() {}
 
 func (x *CallSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_streambridge_proto_msgTypes[4]
+	mi := &file_audio_gateway_proto_msgTypes[4]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -396,7 +396,7 @@ func (x *CallSummary) ProtoReflect() protoreflect.Message {
 }
 
 func (*CallSummary) Descriptor() ([]byte, []int) {
-	return file_streambridge_proto_rawDescGZIP(), []int{4}
+	return file_audio_gateway_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *CallSummary) GetCallId() string {
@@ -448,9 +448,9 @@ func (x *CallSummary) GetTotalEvents() int32 {
 	return 0
 }
 
-var File_streambridge_proto protoreflect.FileDescriptor
+var File_audio_gateway_proto protoreflect.FileDescriptor
 
-var file_streambridge_proto_rawDesc = []byte{
+var file_audio_gateway_proto_rawDesc = []byte{
 	0x0a, 0x12, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6d, 0x62, 0x72, 0x69, 0x64, 
 	0x67, 0x65, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x0f, 0x73, 0x74, 
 	0x72, 0x65, 0x61, 0x6d, 0x62, 0x72, 0x69, 0x64, 0x67, 0x65, 0x2e, 0x76, 
@@ -540,35 +540,35 @@ var file_streambridge_proto_rawDesc = []byte{
 }
 
 var (
-	file_streambridge_proto_rawDescOnce sync.Once
-	file_streambridge_proto_rawDescData = file_streambridge_proto_rawDesc
+	file_audio_gateway_proto_rawDescOnce sync.Once
+	file_audio_gateway_proto_rawDescData = file_audio_gateway_proto_rawDesc
 )
 
-func file_streambridge_proto_rawDescGZIP() []byte {
-	file_streambridge_proto_rawDescOnce.Do(func() {
-		file_streambridge_proto_rawDescData = protoimpl.X.CompressGZIP(file_streambridge_proto_rawDescData)
+func file_audio_gateway_proto_rawDescGZIP() []byte {
+	file_audio_gateway_proto_rawDescOnce.Do(func() {
+		file_audio_gateway_proto_rawDescData = protoimpl.X.CompressGZIP(file_audio_gateway_proto_rawDescData)
 	})
-	return file_streambridge_proto_rawDescData
+	return file_audio_gateway_proto_rawDescData
 }
 
-var file_streambridge_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_streambridge_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
-var file_streambridge_proto_goTypes = []any{
-	(EventType)(0),         // 0: streambridge.v1.EventType
-	(*AudioChunk)(nil),     // 1: streambridge.v1.AudioChunk
-	(*CallEvent)(nil),      // 2: streambridge.v1.CallEvent
-	(*WatchRequest)(nil),   // 3: streambridge.v1.WatchRequest
-	(*SummaryRequest)(nil), // 4: streambridge.v1.SummaryRequest
-	(*CallSummary)(nil),    // 5: streambridge.v1.CallSummary
+var file_audio_gateway_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_audio_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_audio_gateway_proto_goTypes = []any{
+	(EventType)(0),         // 0: audio-gateway.v1.EventType
+	(*AudioChunk)(nil),     // 1: audio-gateway.v1.AudioChunk
+	(*CallEvent)(nil),      // 2: audio-gateway.v1.CallEvent
+	(*WatchRequest)(nil),   // 3: audio-gateway.v1.WatchRequest
+	(*SummaryRequest)(nil), // 4: audio-gateway.v1.SummaryRequest
+	(*CallSummary)(nil),    // 5: audio-gateway.v1.CallSummary
 }
-var file_streambridge_proto_depIdxs = []int32{
-	0, // 0: streambridge.v1.CallEvent.type:type_name -> streambridge.v1.EventType
-	1, // 1: streambridge.v1.StreamBridge.StreamCall:input_type -> streambridge.v1.AudioChunk
-	3, // 2: streambridge.v1.StreamBridge.WatchCall:input_type -> streambridge.v1.WatchRequest
-	4, // 3: streambridge.v1.StreamBridge.GetCallSummary:input_type -> streambridge.v1.SummaryRequest
-	2, // 4: streambridge.v1.StreamBridge.StreamCall:output_type -> streambridge.v1.CallEvent
-	2, // 5: streambridge.v1.StreamBridge.WatchCall:output_type -> streambridge.v1.CallEvent
-	5, // 6: streambridge.v1.StreamBridge.GetCallSummary:output_type -> streambridge.v1.CallSummary
+var file_audio_gateway_proto_depIdxs = []int32{
+	0, // 0: audio-gateway.v1.CallEvent.type:type_name -> audio-gateway.v1.EventType
+	1, // 1: audio-gateway.v1.AudioGateway.StreamCall:input_type -> audio-gateway.v1.AudioChunk
+	3, // 2: audio-gateway.v1.AudioGateway.WatchCall:input_type -> audio-gateway.v1.WatchRequest
+	4, // 3: audio-gateway.v1.AudioGateway.GetCallSummary:input_type -> audio-gateway.v1.SummaryRequest
+	2, // 4: audio-gateway.v1.AudioGateway.StreamCall:output_type -> audio-gateway.v1.CallEvent
+	2, // 5: audio-gateway.v1.AudioGateway.WatchCall:output_type -> audio-gateway.v1.CallEvent
+	5, // 6: audio-gateway.v1.AudioGateway.GetCallSummary:output_type -> audio-gateway.v1.CallSummary
 	4, // [4:7] is the sub-list for method output_type
 	1, // [1:4] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name
@@ -576,28 +576,28 @@ var file_streambridge_proto_depIdxs = []int32{
 	0, // [0:1] is the sub-list for field type_name
 }
 
-func init() { file_streambridge_proto_init() }
-func file_streambridge_proto_init() {
-	if File_streambridge_proto != nil {
+func init() { file_audio_gateway_proto_init() }
+func file_audio_gateway_proto_init() {
+	if File_audio_gateway_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: file_streambridge_proto_rawDesc,
+			RawDescriptor: file_audio_gateway_proto_rawDesc,
 			NumEnums:      1,
 			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_streambridge_proto_goTypes,
-		DependencyIndexes: file_streambridge_proto_depIdxs,
-		EnumInfos:         file_streambridge_proto_enumTypes,
-		MessageInfos:      file_streambridge_proto_msgTypes,
+		GoTypes:           file_audio_gateway_proto_goTypes,
+		DependencyIndexes: file_audio_gateway_proto_depIdxs,
+		EnumInfos:         file_audio_gateway_proto_enumTypes,
+		MessageInfos:      file_audio_gateway_proto_msgTypes,
 	}.Build()
-	File_streambridge_proto = out.File
-	file_streambridge_proto_rawDesc = nil
-	file_streambridge_proto_goTypes = nil
-	file_streambridge_proto_depIdxs = nil
+	File_audio_gateway_proto = out.File
+	file_audio_gateway_proto_rawDesc = nil
+	file_audio_gateway_proto_goTypes = nil
+	file_audio_gateway_proto_depIdxs = nil
 }

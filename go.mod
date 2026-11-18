@@ -1,4 +1,4 @@
-module github.com/yoohooshantanu/streambridge
+module github.com/yoohooshantanu/audio-gateway
 
 go 1.23.0
 

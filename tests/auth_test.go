@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoohooshantanu/streambridge/internal/interceptor"
-	"github.com/yoohooshantanu/streambridge/internal/pb"
+	"github.com/yoohooshantanu/audio-gateway/internal/interceptor"
+	"github.com/yoohooshantanu/audio-gateway/internal/pb"
 	"google.golang.org/grpc/codes"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"

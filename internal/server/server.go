@@ -7,32 +7,32 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/yoohooshantanu/streambridge/internal/interceptor"
-	"github.com/yoohooshantanu/streambridge/internal/logger"
-	"github.com/yoohooshantanu/streambridge/internal/metrics"
-	"github.com/yoohooshantanu/streambridge/internal/pb"
-	"github.com/yoohooshantanu/streambridge/internal/router"
-	"github.com/yoohooshantanu/streambridge/internal/worker"
+	"github.com/yoohooshantanu/audio-gateway/internal/interceptor"
+	"github.com/yoohooshantanu/audio-gateway/internal/logger"
+	"github.com/yoohooshantanu/audio-gateway/internal/metrics"
+	"github.com/yoohooshantanu/audio-gateway/internal/pb"
+	"github.com/yoohooshantanu/audio-gateway/internal/router"
+	"github.com/yoohooshantanu/audio-gateway/internal/worker"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-type StreamBridgeServer struct {
-	pb.UnimplementedStreamBridgeServer
+type AudioGatewayServer struct {
+	pb.UnimplementedAudioGatewayServer
 	router *router.EventRouter
 	pool   *worker.AIWorkerPool
 }
 
-func NewStreamBridgeServer(r *router.EventRouter, p *worker.AIWorkerPool) *StreamBridgeServer {
-	return &StreamBridgeServer{
+func NewAudioGatewayServer(r *router.EventRouter, p *worker.AIWorkerPool) *AudioGatewayServer {
+	return &AudioGatewayServer{
 		router: r,
 		pool:   p,
 	}
 }
 
 // StreamCall manages bidirectional streaming between telephony client and AI workers
-func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.AudioChunk, pb.CallEvent]) (err error) {
+func (s *AudioGatewayServer) StreamCall(stream grpc.BidiStreamingServer[pb.AudioChunk, pb.CallEvent]) (err error) {
 	metrics.DefaultMetrics.IncStream()
 	defer metrics.DefaultMetrics.DecStream()
 
@@ -223,7 +223,7 @@ func (s *StreamBridgeServer) StreamCall(stream grpc.BidiStreamingServer[pb.Audio
 }
 
 // WatchCall handles server-side streaming for external supervisors, analytics, and CRMs
-func (s *StreamBridgeServer) WatchCall(req *pb.WatchRequest, stream grpc.ServerStreamingServer[pb.CallEvent]) error {
+func (s *AudioGatewayServer) WatchCall(req *pb.WatchRequest, stream grpc.ServerStreamingServer[pb.CallEvent]) error {
 	if req.CallId == "" {
 		return status.Error(codes.InvalidArgument, "call_id is required")
 	}
@@ -274,7 +274,7 @@ func (s *StreamBridgeServer) WatchCall(req *pb.WatchRequest, stream grpc.ServerS
 }
 
 // GetCallSummary provides unary post-call analytics lookup with tenant isolation
-func (s *StreamBridgeServer) GetCallSummary(ctx context.Context, req *pb.SummaryRequest) (*pb.CallSummary, error) {
+func (s *AudioGatewayServer) GetCallSummary(ctx context.Context, req *pb.SummaryRequest) (*pb.CallSummary, error) {
 	if req.CallId == "" {
 		return nil, status.Error(codes.InvalidArgument, "call_id is required")
 	}

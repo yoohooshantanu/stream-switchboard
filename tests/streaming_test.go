@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoohooshantanu/streambridge/internal/health"
-	"github.com/yoohooshantanu/streambridge/internal/interceptor"
-	"github.com/yoohooshantanu/streambridge/internal/pb"
-	"github.com/yoohooshantanu/streambridge/internal/router"
-	"github.com/yoohooshantanu/streambridge/internal/server"
-	"github.com/yoohooshantanu/streambridge/internal/worker"
+	"github.com/yoohooshantanu/audio-gateway/internal/health"
+	"github.com/yoohooshantanu/audio-gateway/internal/interceptor"
+	"github.com/yoohooshantanu/audio-gateway/internal/pb"
+	"github.com/yoohooshantanu/audio-gateway/internal/router"
+	"github.com/yoohooshantanu/audio-gateway/internal/server"
+	"github.com/yoohooshantanu/audio-gateway/internal/worker"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -32,7 +32,7 @@ type testHarness struct {
 	router     *router.EventRouter
 	pool       *worker.AIWorkerPool
 	keyReg     *interceptor.MemoryKeyRegistry
-	client     pb.StreamBridgeClient
+	client     pb.AudioGatewayClient
 	health     healthpb.HealthClient
 	conn       *grpc.ClientConn
 }
@@ -53,8 +53,8 @@ func setupTestHarness(t *testing.T) *testHarness {
 		grpc.ChainStreamInterceptor(interceptor.NewStreamAuthInterceptor(keyReg)),
 	)
 
-	bridgeServer := server.NewStreamBridgeServer(router, pool)
-	pb.RegisterStreamBridgeServer(grpcServer, bridgeServer)
+	bridgeServer := server.NewAudioGatewayServer(router, pool)
+	pb.RegisterAudioGatewayServer(grpcServer, bridgeServer)
 	healthServer := health.NewHealthServer()
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
 
@@ -74,7 +74,7 @@ func setupTestHarness(t *testing.T) *testHarness {
 		t.Fatalf("failed to dial bufnet: %v", err)
 	}
 
-	client := pb.NewStreamBridgeClient(conn)
+	client := pb.NewAudioGatewayClient(conn)
 	healthClient := healthpb.NewHealthClient(conn)
 
 	h := &testHarness{

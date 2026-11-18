@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yoohooshantanu/streambridge/internal/logger"
-	"github.com/yoohooshantanu/streambridge/internal/metrics"
+	"github.com/yoohooshantanu/audio-gateway/internal/logger"
+	"github.com/yoohooshantanu/audio-gateway/internal/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"

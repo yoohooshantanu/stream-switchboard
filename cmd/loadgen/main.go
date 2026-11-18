@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/yoohooshantanu/streambridge/internal/pb"
+	"github.com/yoohooshantanu/audio-gateway/internal/pb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -118,21 +118,21 @@ func parsePrometheusMetrics(body string) (*MetricSnapshot, error) {
 			continue
 		}
 
-		if strings.HasPrefix(metricKey, "streambridge_active_streams") {
+		if strings.HasPrefix(metricKey, "audio_gateway_active_streams") {
 			snap.ActiveStreams = val
-		} else if strings.HasPrefix(metricKey, "streambridge_active_watchers") {
+		} else if strings.HasPrefix(metricKey, "audio_gateway_active_watchers") {
 			snap.ActiveWatchers = val
-		} else if strings.HasPrefix(metricKey, "streambridge_audio_packets_total{direction=\"inbound\"}") {
+		} else if strings.HasPrefix(metricKey, "audio_gateway_audio_packets_total{direction=\"inbound\"}") {
 			snap.AudioPacketsTotal = val
-		} else if strings.HasPrefix(metricKey, "streambridge_audio_bytes_total{direction=\"inbound\"}") {
+		} else if strings.HasPrefix(metricKey, "audio_gateway_audio_bytes_total{direction=\"inbound\"}") {
 			snap.AudioBytesTotal = val
-		} else if strings.HasPrefix(metricKey, "streambridge_sequence_gap_timeouts_total") {
+		} else if strings.HasPrefix(metricKey, "audio_gateway_sequence_gap_timeouts_total") {
 			snap.SequenceGapErrors = val
-		} else if strings.HasPrefix(metricKey, "streambridge_duplicate_frames_dropped_total") {
+		} else if strings.HasPrefix(metricKey, "audio_gateway_duplicate_frames_dropped_total") {
 			snap.DuplicateDropped = val
-		} else if strings.HasPrefix(metricKey, "streambridge_late_frames_tombstone_dropped_total") {
+		} else if strings.HasPrefix(metricKey, "audio_gateway_late_frames_tombstone_dropped_total") {
 			snap.TombstoneDropped = val
-		} else if strings.HasPrefix(metricKey, "streambridge_events_dropped_total") {
+		} else if strings.HasPrefix(metricKey, "audio_gateway_events_dropped_total") {
 			snap.EventsDropped = val
 		} else if strings.HasPrefix(metricKey, "go_goroutines") {
 			snap.Goroutines = val
@@ -140,19 +140,19 @@ func parsePrometheusMetrics(body string) (*MetricSnapshot, error) {
 			snap.RSSBytes = val
 		} else if strings.HasPrefix(metricKey, "process_cpu_seconds_total") {
 			snap.ProcessCPUSeconds = val
-		} else if strings.HasPrefix(metricKey, "streambridge_worker_queue_depth{") {
+		} else if strings.HasPrefix(metricKey, "audio_gateway_worker_queue_depth{") {
 			queueDepths = append(queueDepths, val)
-		} else if strings.HasPrefix(metricKey, "streambridge_packet_queue_wait_seconds_bucket{") {
+		} else if strings.HasPrefix(metricKey, "audio_gateway_packet_queue_wait_seconds_bucket{") {
 			le := extractLE(metricKey)
 			snap.QueueWaitBuckets[le] = uint64(val)
-		} else if strings.HasPrefix(metricKey, "streambridge_packet_queue_wait_seconds_count") {
+		} else if strings.HasPrefix(metricKey, "audio_gateway_packet_queue_wait_seconds_count") {
 			snap.QueueWaitCount = uint64(val)
-		} else if strings.HasPrefix(metricKey, "streambridge_packet_processing_seconds_bucket{") {
+		} else if strings.HasPrefix(metricKey, "audio_gateway_packet_processing_seconds_bucket{") {
 			le := extractLE(metricKey)
 			snap.ProcessingBuckets[le] = uint64(val)
-		} else if strings.HasPrefix(metricKey, "streambridge_packet_processing_seconds_sum") {
+		} else if strings.HasPrefix(metricKey, "audio_gateway_packet_processing_seconds_sum") {
 			snap.ProcessingSum = val
-		} else if strings.HasPrefix(metricKey, "streambridge_packet_processing_seconds_count") {
+		} else if strings.HasPrefix(metricKey, "audio_gateway_packet_processing_seconds_count") {
 			snap.ProcessingCount = uint64(val)
 		}
 	}
@@ -282,9 +282,9 @@ func main() {
 	staggerWindow := flag.Duration("stagger-window", 1500*time.Millisecond, "Ramp duration over which call start times are staggered")
 	frameInterval := flag.Duration("frame-interval", 20*time.Millisecond, "Audio chunk pacing interval (default: 20ms = 50 pps per call)")
 	numRuns := flag.Int("runs", 3, "Number of repeated test runs to report min-max ranges")
-	serverWorkers := flag.Int("workers", 4, "Number of AI workers configured in streambridge server")
+	serverWorkers := flag.Int("workers", 4, "Number of AI workers configured in audio-gateway server")
 	profileDir := flag.String("profile-dir", "./loadtest_profiles", "Directory to store pprof artifacts at the knee")
-	serverCmdFlag := flag.String("server-bin", "./bin/streambridge.exe", "Path to streambridge server binary to launch/restart per run")
+	serverCmdFlag := flag.String("server-bin", "./bin/audio-gateway.exe", "Path to audio-gateway server binary to launch/restart per run")
 	autoRestart := flag.Bool("auto-restart", false, "Automatically start/restart the server binary between runs")
 	flag.Parse()
 
@@ -435,7 +435,7 @@ func startServerProcess(binPath string, numWorkers int) (*exec.Cmd, *os.File) {
 		fmt.Sprintf("WORKER_POOL_SIZE=%d", numWorkers),
 		"STREAMBRIDGE_API_KEY=sb_loadtest_key",
 	)
-	logFile, err := os.OpenFile("streambridge_server.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	logFile, err := os.OpenFile("audio_gateway_server.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err == nil {
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
@@ -563,7 +563,7 @@ func executeStep(
 				return
 			}
 
-			client := pb.NewStreamBridgeClient(conn)
+			client := pb.NewAudioGatewayClient(conn)
 			ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", apiKey)
 			stream, err := client.StreamCall(ctx)
 			if err != nil {

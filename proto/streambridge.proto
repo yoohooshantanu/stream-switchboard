@@ -1,11 +1,11 @@
 syntax = "proto3";
 
-package streambridge.v1;
+package audio-gateway.v1;
 
-option go_package = "github.com/yoohooshantanu/streambridge/internal/pb";
+option go_package = "github.com/yoohooshantanu/audio-gateway/internal/pb";
 
-// StreamBridge manages real-time bidirectional audio event streams and subscriber fan-out.
-service StreamBridge {
+// AudioGateway manages real-time bidirectional audio event streams and subscriber fan-out.
+service AudioGateway {
   // StreamCall is a bidirectional streaming RPC:
   // The client streams AudioChunks into the server; the server streams CallEvents back in real time.
   rpc StreamCall(stream AudioChunk) returns (stream CallEvent);

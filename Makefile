@@ -1,12 +1,12 @@
 .PHONY: all build test bench clean run docker-build docker-up proto
 
-BINARY_NAME=streambridge
+BINARY_NAME=audio-gateway
 BIN_DIR=bin
 
 all: test build
 
 build:
-	@echo "==> Building StreamBridge binary..."
+	@echo "==> Building AudioGateway binary..."
 	go build -o $(BIN_DIR)/$(BINARY_NAME) ./cmd/server
 
 test:
@@ -19,14 +19,14 @@ test-quick:
 
 bench:
 	@echo "==> Running gRPC bidirectional throughput benchmark..."
-	go test -bench=BenchmarkStreamBridgeThroughput -benchmem -run=^$$ ./tests/...
+	go test -bench=BenchmarkAudioGatewayThroughput -benchmem -run=^$$ ./tests/...
 
 run: build
-	@echo "==> Running StreamBridge on :50051 (gRPC) and :8083 (HTTP metrics)..."
+	@echo "==> Running AudioGateway on :50051 (gRPC) and :8083 (HTTP metrics)..."
 	./$(BIN_DIR)/$(BINARY_NAME)
 
 docker-build:
-	docker build -t streambridge:latest .
+	docker build -t audio-gateway:latest .
 
 docker-up:
 	docker compose up -d

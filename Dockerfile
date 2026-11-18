@@ -1,4 +1,4 @@
-# Multi-stage Docker build for StreamBridge
+# Multi-stage Docker build for AudioGateway
 FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
@@ -11,16 +11,16 @@ RUN go mod download
 COPY . .
 
 # Build statically linked binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /bin/streambridge ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /bin/audio-gateway ./cmd/server
 
 # Distroless runtime image
 FROM gcr.io/distroless/static:nonroot
 
 WORKDIR /
-COPY --from=builder /bin/streambridge /streambridge
+COPY --from=builder /bin/audio-gateway /audio-gateway
 
 USER nonroot:nonroot
 
 EXPOSE 50051 8083
 
-ENTRYPOINT ["/streambridge"]
+ENTRYPOINT ["/audio-gateway"]

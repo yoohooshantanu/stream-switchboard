@@ -1,10 +1,10 @@
-# StreamBridge
+# AudioGateway
 
-[![StreamBridge CI](https://github.com/yoohooshantanu/streambridge/actions/workflows/ci.yml/badge.svg)](https://github.com/yoohooshantanu/streambridge/actions)
-[![Go Report Card](https://goreportcard.com/badge/github.com/yoohooshantanu/streambridge)](https://goreportcard.com/report/github.com/yoohooshantanu/streambridge)
+[![AudioGateway CI](https://github.com/yoohooshantanu/audio-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/yoohooshantanu/audio-gateway/actions)
+[![Go Report Card](https://goreportcard.com/badge/github.com/yoohooshantanu/audio-gateway)](https://goreportcard.com/report/github.com/yoohooshantanu/audio-gateway)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**StreamBridge** is a high-throughput, low-latency gRPC bidirectional streaming gateway engineered for real-time telephony and AI voice processing infrastructure. It ingests streaming audio frames from callers, coordinates concurrent AI workers (ASR transcription, real-time sentiment analysis, intent classification), and fans out live event streams to external watchers (CRMs, supervisor dashboards, analytics sinks).
+**AudioGateway** is a high-throughput, low-latency gRPC bidirectional streaming gateway engineered for real-time telephony and AI voice processing infrastructure. It ingests streaming audio frames from callers, coordinates concurrent AI workers (ASR transcription, real-time sentiment analysis, intent classification), and fans out live event streams to external watchers (CRMs, supervisor dashboards, analytics sinks).
 
 ---
 
@@ -25,7 +25,7 @@
 ## Architectural Scope & Deterministic AI Engines
 
 > [!NOTE]
-> **Transport Architecture vs. Model Inference**: StreamBridge is designed as a carrier-grade streaming network gateway focusing on bidirectional framing, backpressure handling, fan-out distribution, and tenant isolation.
+> **Transport Architecture vs. Model Inference**: AudioGateway is designed as a carrier-grade streaming network gateway focusing on bidirectional framing, backpressure handling, fan-out distribution, and tenant isolation.
 >
 > The built-in worker processors (ASR streaming transcriber, sentiment analyzer, and intent detector) are **deterministic in-memory streaming mock engines**. This architectural separation allows high-throughput performance benchmarking, hermetic integration testing, and predictable pipeline latency without external GPU clusters, network egress overhead, or third-party SaaS API credits. In production environments, these worker routines act as adapters forwarding raw frames to proprietary or vendor ASR/LLM inference endpoints.
 
@@ -35,7 +35,7 @@
 
 ```
                        ┌──────────────────────────────────────────────────────────┐
-                       │                       StreamBridge                       │
+                       │                       AudioGateway                       │
                        │                                                          │
 Telephony Client ─────►│  gRPC Server (:50051)                                    │
 (AudioChunk stream)    │    ├─ UnaryAuthInterceptor & StreamAuthInterceptor       │
@@ -70,16 +70,16 @@ Supervisor / CRM ─────►│  WatchCall Handler (Server Streaming)    
 
 ---
 
-## gRPC Protocol Specification (`proto/streambridge.proto`)
+## gRPC Protocol Specification (`proto/audio_gateway.proto`)
 
 ```protobuf
 syntax = "proto3";
 
-package streambridge.v1;
+package audio-gateway.v1;
 
-option go_package = "github.com/yoohooshantanu/streambridge/internal/pb";
+option go_package = "github.com/yoohooshantanu/audio-gateway/internal/pb";
 
-service StreamBridge {
+service AudioGateway {
   rpc StreamCall(stream AudioChunk) returns (stream CallEvent);
   rpc WatchCall(WatchRequest) returns (stream CallEvent);
   rpc GetCallSummary(SummaryRequest) returns (CallSummary);
@@ -170,8 +170,8 @@ All benchmarks executed via in-process `bufconn` listener (Windows amd64, AMD Ry
 
 ### 1. Sequential Stream Throughput
 ```
-pkg: github.com/yoohooshantanu/streambridge/tests
-BenchmarkStreamBridgeThroughput-8    4726    233320 ns/op    13952 B/op    227 allocs/op
+pkg: github.com/yoohooshantanu/audio-gateway/tests
+BenchmarkAudioGatewayThroughput-8    4726    233320 ns/op    13952 B/op    227 allocs/op
 ```
 * **~233 µs per full end-to-end stream session**, including HTTP/2 bidi stream initialization, 3 audio chunks, ASR/Sentiment/Intent processing, event fan-out, and clean response drain.
 
@@ -202,7 +202,7 @@ benchstat baseline.txt optimized.txt
 **Statistical Comparison (`benchstat -count=10 baseline.txt optimized.txt`)**:
 ```
 goarch: amd64
-pkg: github.com/yoohooshantanu/streambridge/tests
+pkg: github.com/yoohooshantanu/audio-gateway/tests
 cpu: AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx  
                             │ baseline.txt │            optimized.txt             │
                             │    sec/op    │    sec/op     vs base                │
@@ -230,14 +230,14 @@ A dedicated load generator (`cmd/loadgen`) drives realistic multi-stream bidirec
 * **Hardware**: AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx (4 Physical Cores, 8 Logical Processors), 8 GB RAM.
 * **Operating System**: Windows 11 Home Single Language (64-bit).
 * **Toolchain**: `go version go1.27.0 windows/amd64` (module target: `go 1.23.0`).
-* **Co-Location Disclaimer**: The load generator and the StreamBridge server were co-located on the same physical host and communicated over the local loopback interface (`127.0.0.1`). Both processes directly competed for CPU cores, Go runtime scheduler time slices, and OS network socket buffers. These benchmarks measure local process behavior under contention and make **no claims of production capacity or cloud deployment throughput**.
+* **Co-Location Disclaimer**: The load generator and the AudioGateway server were co-located on the same physical host and communicated over the local loopback interface (`127.0.0.1`). Both processes directly competed for CPU cores, Go runtime scheduler time slices, and OS network socket buffers. These benchmarks measure local process behavior under contention and make **no claims of production capacity or cloud deployment throughput**.
 * **Generator Self-Check & Timing Precision**: Frame pacing on Windows uses multimedia high-resolution timer interrupt alignment (`timeBeginPeriod(1)`) to avoid default scheduler quantum jitter (with non-Windows fallback stubs). The generator tracks tick arrival lateness relative to scheduled 20ms intervals; ticks delayed >5ms advance schedule without catch-up bursting. A step is marked throttled if late ticks exceed 2% of offered packets.
-* **Run Discipline**: Stream starts are staggered over 1.5 seconds (`-stagger-window=1500ms`), the first 4 seconds of each step are discarded as warmup (`-warmup-duration=4s`), and between steps the generator waits until `streambridge_active_streams == 0`. The server binary is restarted cleanly between each of the 3 repeated benchmark runs. Metrics (p50/p95/p99 enqueue-to-dequeue delay and processing latency, memory, goroutines) are extracted directly from the server's Prometheus registry (`/metrics`), not from the client.
+* **Run Discipline**: Stream starts are staggered over 1.5 seconds (`-stagger-window=1500ms`), the first 4 seconds of each step are discarded as warmup (`-warmup-duration=4s`), and between steps the generator waits until `audio_gateway_active_streams == 0`. The server binary is restarted cleanly between each of the 3 repeated benchmark runs. Metrics (p50/p95/p99 enqueue-to-dequeue delay and processing latency, memory, goroutines) are extracted directly from the server's Prometheus registry (`/metrics`), not from the client.
 
 ### Load Test Commands
 ```powershell
 # Build binaries
-go build -o bin/streambridge.exe ./cmd/server
+go build -o bin/audio-gateway.exe ./cmd/server
 go build -o bin/loadgen.exe ./cmd/loadgen
 
 # Execute 3-run automated load test with auto-restart and pprof capture at knee
@@ -321,7 +321,7 @@ Partitioning incoming chunks across workers requires hashing the `call_id` strin
 ```
 goos: windows
 goarch: amd64
-pkg: github.com/yoohooshantanu/streambridge/internal/worker
+pkg: github.com/yoohooshantanu/audio-gateway/internal/worker
 cpu: AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx  
 BenchmarkHashCallID_Old-8      	17404849	        69.36 ns/op	       0 B/op	       0 allocs/op
 BenchmarkHashCallID_Inline-8   	37257129	        34.65 ns/op	       0 B/op	       0 allocs/op

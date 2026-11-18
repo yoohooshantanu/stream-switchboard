@@ -3,9 +3,9 @@ package router
 import (
 	"sync"
 
-	"github.com/yoohooshantanu/streambridge/internal/logger"
-	"github.com/yoohooshantanu/streambridge/internal/metrics"
-	"github.com/yoohooshantanu/streambridge/internal/pb"
+	"github.com/yoohooshantanu/audio-gateway/internal/logger"
+	"github.com/yoohooshantanu/audio-gateway/internal/metrics"
+	"github.com/yoohooshantanu/audio-gateway/internal/pb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )

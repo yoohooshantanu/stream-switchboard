@@ -13,7 +13,7 @@ import (
 // Under NO circumstances may high-cardinality values such as call_id, tenant_id, or user_id
 // be used as Prometheus label dimensions. In high-throughput real-time telephony processing
 // millions of calls, dynamic IDs in labels cause catastrophic metric cardinality explosion,
-// exhaust Prometheus RAM, and cause scrape timeouts. Label dimensions in StreamBridge are
+// exhaust Prometheus RAM, and cause scrape timeouts. Label dimensions in AudioGateway are
 // strictly bounded to finite enumerations: method, code, direction, event_type, worker_id.
 // High-cardinality attributes belong exclusively in structured logs and distributed tracing.
 
@@ -69,74 +69,74 @@ func NewMetrics() *Metrics {
 		Registry: reg,
 
 		ActiveStreamsGauge: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "streambridge_active_streams",
+			Name: "audio_gateway_active_streams",
 			Help: "Current number of active bidirectional call streams",
 		}),
 
 		ActiveWatchersGauge: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "streambridge_active_watchers",
+			Name: "audio_gateway_active_watchers",
 			Help: "Current number of active server-streaming watchers",
 		}),
 
 		WorkerQueueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "streambridge_worker_queue_depth",
+			Name: "audio_gateway_worker_queue_depth",
 			Help: "Current number of buffered audio chunk jobs per worker queue",
 		}, []string{"worker_id"}),
 
 		SequenceGapTimeoutsTotal: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "streambridge_sequence_gap_timeouts_total",
+			Name: "audio_gateway_sequence_gap_timeouts_total",
 			Help: "Cumulative count of session terminations caused by missing audio frame sequence gaps exceeding timeout",
 		}),
 
 		DuplicateFramesDroppedTotal: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "streambridge_duplicate_frames_dropped_total",
+			Name: "audio_gateway_duplicate_frames_dropped_total",
 			Help: "Cumulative count of redundant audio chunks dropped due to already processed sequence numbers",
 		}),
 
 		LateFramesTombstoneDroppedTotal: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "streambridge_late_frames_tombstone_dropped_total",
+			Name: "audio_gateway_late_frames_tombstone_dropped_total",
 			Help: "Cumulative count of late-arriving audio chunks discarded because their session was previously aborted (tombstone)",
 		}),
 
 		AudioPacketsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "streambridge_audio_packets_total",
+			Name: "audio_gateway_audio_packets_total",
 			Help: "Cumulative count of audio chunks ingested or emitted",
 		}, []string{"direction"}),
 
 		AudioBytesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "streambridge_audio_bytes_total",
+			Name: "audio_gateway_audio_bytes_total",
 			Help: "Cumulative count of audio payload bytes transferred",
 		}, []string{"direction"}),
 
 		EventsEmittedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "streambridge_events_emitted_total",
+			Name: "audio_gateway_events_emitted_total",
 			Help: "Cumulative count of real-time call events published",
 		}, []string{"event_type"}),
 
 		EventsDroppedTotal: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "streambridge_events_dropped_total",
+			Name: "audio_gateway_events_dropped_total",
 			Help: "Cumulative count of events dropped due to slow subscriber channel backpressure",
 		}),
 
 		GRPCRequestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "streambridge_grpc_requests_total",
+			Name: "audio_gateway_grpc_requests_total",
 			Help: "Cumulative count of gRPC invocations completed",
 		}, []string{"method", "code"}),
 
 		PacketQueueWaitHistogram: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "streambridge_packet_queue_wait_seconds",
+			Name:    "audio_gateway_packet_queue_wait_seconds",
 			Help:    "Duration audio packets wait in worker channel buffer before execution begins",
 			Buckets: packetQueueWaitBuckets,
 		}),
 
 		PacketProcessingHistogram: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "streambridge_packet_processing_seconds",
+			Name:    "audio_gateway_packet_processing_seconds",
 			Help:    "Execution duration for reassembly, sequencing, and AI inference dispatch per audio chunk",
 			Buckets: packetProcessingBuckets,
 		}),
 
 		GRPCRequestDurationHistogram: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "streambridge_grpc_request_duration_seconds",
+			Name:    "audio_gateway_grpc_request_duration_seconds",
 			Help:    "Total invocation duration of gRPC calls",
 			Buckets: rpcLatencyBuckets,
 		}, []string{"method", "code"}),

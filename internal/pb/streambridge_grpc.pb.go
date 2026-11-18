@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v5.27.1
-// source: streambridge.proto
+// source: audio_gateway.proto
 
 package pb
 
@@ -19,13 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	StreamBridge_StreamCall_FullMethodName     = "/streambridge.v1.StreamBridge/StreamCall"
-	StreamBridge_WatchCall_FullMethodName      = "/streambridge.v1.StreamBridge/WatchCall"
-	StreamBridge_GetCallSummary_FullMethodName = "/streambridge.v1.StreamBridge/GetCallSummary"
+	AudioGateway_StreamCall_FullMethodName     = "/audio-gateway.v1.AudioGateway/StreamCall"
+	AudioGateway_WatchCall_FullMethodName      = "/audio-gateway.v1.AudioGateway/WatchCall"
+	AudioGateway_GetCallSummary_FullMethodName = "/audio-gateway.v1.AudioGateway/GetCallSummary"
 )
 
-// StreamBridgeClient is the client API for StreamBridge service.
-type StreamBridgeClient interface {
+// AudioGatewayClient is the client API for AudioGateway service.
+type AudioGatewayClient interface {
 	StreamCall(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AudioChunk, CallEvent], error)
 	WatchCall(ctx context.Context, in *WatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[CallEvent], error)
 	GetCallSummary(ctx context.Context, in *SummaryRequest, opts ...grpc.CallOption) (*CallSummary, error)
@@ -35,13 +35,13 @@ type streamBridgeClient struct {
 	cc grpc.ClientConnInterface
 }
 
-func NewStreamBridgeClient(cc grpc.ClientConnInterface) StreamBridgeClient {
+func NewAudioGatewayClient(cc grpc.ClientConnInterface) AudioGatewayClient {
 	return &streamBridgeClient{cc}
 }
 
 func (c *streamBridgeClient) StreamCall(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AudioChunk, CallEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &StreamBridge_ServiceDesc.Streams[0], StreamBridge_StreamCall_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &AudioGateway_ServiceDesc.Streams[0], AudioGateway_StreamCall_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +49,7 @@ func (c *streamBridgeClient) StreamCall(ctx context.Context, opts ...grpc.CallOp
 	return x, nil
 }
 
-type StreamBridge_StreamCallClient = grpc.BidiStreamingClient[AudioChunk, CallEvent]
+type AudioGateway_StreamCallClient = grpc.BidiStreamingClient[AudioChunk, CallEvent]
 
 type streamBridgeStreamCallClient struct {
 	grpc.ClientStream
@@ -69,7 +69,7 @@ func (x *streamBridgeStreamCallClient) Recv() (*CallEvent, error) {
 
 func (c *streamBridgeClient) WatchCall(ctx context.Context, in *WatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[CallEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &StreamBridge_ServiceDesc.Streams[1], StreamBridge_WatchCall_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &AudioGateway_ServiceDesc.Streams[1], AudioGateway_WatchCall_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +83,7 @@ func (c *streamBridgeClient) WatchCall(ctx context.Context, in *WatchRequest, op
 	return x, nil
 }
 
-type StreamBridge_WatchCallClient = grpc.ServerStreamingClient[CallEvent]
+type AudioGateway_WatchCallClient = grpc.ServerStreamingClient[CallEvent]
 
 type streamBridgeWatchCallClient struct {
 	grpc.ClientStream
@@ -100,90 +100,90 @@ func (x *streamBridgeWatchCallClient) Recv() (*CallEvent, error) {
 func (c *streamBridgeClient) GetCallSummary(ctx context.Context, in *SummaryRequest, opts ...grpc.CallOption) (*CallSummary, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CallSummary)
-	err := c.cc.Invoke(ctx, StreamBridge_GetCallSummary_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, AudioGateway_GetCallSummary_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// StreamBridgeServer is the server API for StreamBridge service.
-type StreamBridgeServer interface {
+// AudioGatewayServer is the server API for AudioGateway service.
+type AudioGatewayServer interface {
 	StreamCall(grpc.BidiStreamingServer[AudioChunk, CallEvent]) error
 	WatchCall(*WatchRequest, grpc.ServerStreamingServer[CallEvent]) error
 	GetCallSummary(context.Context, *SummaryRequest) (*CallSummary, error)
-	mustEmbedUnimplementedStreamBridgeServer()
+	mustEmbedUnimplementedAudioGatewayServer()
 }
 
-// UnimplementedStreamBridgeServer must be embedded to have forward compatible implementations.
-type UnimplementedStreamBridgeServer struct{}
+// UnimplementedAudioGatewayServer must be embedded to have forward compatible implementations.
+type UnimplementedAudioGatewayServer struct{}
 
-func (UnimplementedStreamBridgeServer) StreamCall(grpc.BidiStreamingServer[AudioChunk, CallEvent]) error {
+func (UnimplementedAudioGatewayServer) StreamCall(grpc.BidiStreamingServer[AudioChunk, CallEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method StreamCall not implemented")
 }
-func (UnimplementedStreamBridgeServer) WatchCall(*WatchRequest, grpc.ServerStreamingServer[CallEvent]) error {
+func (UnimplementedAudioGatewayServer) WatchCall(*WatchRequest, grpc.ServerStreamingServer[CallEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method WatchCall not implemented")
 }
-func (UnimplementedStreamBridgeServer) GetCallSummary(context.Context, *SummaryRequest) (*CallSummary, error) {
+func (UnimplementedAudioGatewayServer) GetCallSummary(context.Context, *SummaryRequest) (*CallSummary, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetCallSummary not implemented")
 }
-func (UnimplementedStreamBridgeServer) mustEmbedUnimplementedStreamBridgeServer() {}
+func (UnimplementedAudioGatewayServer) mustEmbedUnimplementedAudioGatewayServer() {}
 
-func RegisterStreamBridgeServer(s grpc.ServiceRegistrar, srv StreamBridgeServer) {
-	s.RegisterService(&StreamBridge_ServiceDesc, srv)
+func RegisterAudioGatewayServer(s grpc.ServiceRegistrar, srv AudioGatewayServer) {
+	s.RegisterService(&AudioGateway_ServiceDesc, srv)
 }
 
-func _StreamBridge_StreamCall_Handler(srv any, stream grpc.ServerStream) error {
-	return srv.(StreamBridgeServer).StreamCall(&grpc.GenericServerStream[AudioChunk, CallEvent]{ServerStream: stream})
+func _AudioGateway_StreamCall_Handler(srv any, stream grpc.ServerStream) error {
+	return srv.(AudioGatewayServer).StreamCall(&grpc.GenericServerStream[AudioChunk, CallEvent]{ServerStream: stream})
 }
 
-func _StreamBridge_WatchCall_Handler(srv any, stream grpc.ServerStream) error {
+func _AudioGateway_WatchCall_Handler(srv any, stream grpc.ServerStream) error {
 	m := new(WatchRequest)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(StreamBridgeServer).WatchCall(m, &grpc.GenericServerStream[WatchRequest, CallEvent]{ServerStream: stream})
+	return srv.(AudioGatewayServer).WatchCall(m, &grpc.GenericServerStream[WatchRequest, CallEvent]{ServerStream: stream})
 }
 
-func _StreamBridge_GetCallSummary_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+func _AudioGateway_GetCallSummary_Handler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	in := new(SummaryRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(StreamBridgeServer).GetCallSummary(ctx, in)
+		return srv.(AudioGatewayServer).GetCallSummary(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: StreamBridge_GetCallSummary_FullMethodName,
+		FullMethod: AudioGateway_GetCallSummary_FullMethodName,
 	}
 	handler := func(ctx context.Context, req any) (any, error) {
-		return srv.(StreamBridgeServer).GetCallSummary(ctx, req.(*SummaryRequest))
+		return srv.(AudioGatewayServer).GetCallSummary(ctx, req.(*SummaryRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-var StreamBridge_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "streambridge.v1.StreamBridge",
-	HandlerType: (*StreamBridgeServer)(nil),
+var AudioGateway_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "audio-gateway.v1.AudioGateway",
+	HandlerType: (*AudioGatewayServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
 			MethodName: "GetCallSummary",
-			Handler:    _StreamBridge_GetCallSummary_Handler,
+			Handler:    _AudioGateway_GetCallSummary_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "StreamCall",
-			Handler:       _StreamBridge_StreamCall_Handler,
+			Handler:       _AudioGateway_StreamCall_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},
 		{
 			StreamName:    "WatchCall",
-			Handler:       _StreamBridge_WatchCall_Handler,
+			Handler:       _AudioGateway_WatchCall_Handler,
 			ServerStreams: true,
 		},
 	},
-	Metadata: "streambridge.proto",
+	Metadata: "audio_gateway.proto",
 }

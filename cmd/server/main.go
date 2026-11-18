@@ -14,14 +14,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yoohooshantanu/streambridge/internal/health"
-	"github.com/yoohooshantanu/streambridge/internal/interceptor"
-	"github.com/yoohooshantanu/streambridge/internal/logger"
-	"github.com/yoohooshantanu/streambridge/internal/metrics"
-	"github.com/yoohooshantanu/streambridge/internal/pb"
-	"github.com/yoohooshantanu/streambridge/internal/router"
-	"github.com/yoohooshantanu/streambridge/internal/server"
-	"github.com/yoohooshantanu/streambridge/internal/worker"
+	"github.com/yoohooshantanu/audio-gateway/internal/health"
+	"github.com/yoohooshantanu/audio-gateway/internal/interceptor"
+	"github.com/yoohooshantanu/audio-gateway/internal/logger"
+	"github.com/yoohooshantanu/audio-gateway/internal/metrics"
+	"github.com/yoohooshantanu/audio-gateway/internal/pb"
+	"github.com/yoohooshantanu/audio-gateway/internal/router"
+	"github.com/yoohooshantanu/audio-gateway/internal/server"
+	"github.com/yoohooshantanu/audio-gateway/internal/worker"
 	"google.golang.org/grpc"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
@@ -49,7 +49,7 @@ func main() {
 		}
 	}
 
-	logger.L.Info("starting_streambridge", "grpc_port", grpcPort, "http_port", httpPort, "workers", workerCount)
+	logger.L.Info("starting_audio-gateway", "grpc_port", grpcPort, "http_port", httpPort, "workers", workerCount)
 
 	// 1. Initialize Event Router & AI Worker Pool
 	eventRouter := router.NewEventRouter()
@@ -68,9 +68,9 @@ func main() {
 		),
 	)
 
-	// Register Core StreamBridge and Standard Health Service
-	bridgeServer := server.NewStreamBridgeServer(eventRouter, workerPool)
-	pb.RegisterStreamBridgeServer(grpcServer, bridgeServer)
+	// Register Core AudioGateway and Standard Health Service
+	bridgeServer := server.NewAudioGatewayServer(eventRouter, workerPool)
+	pb.RegisterAudioGatewayServer(grpcServer, bridgeServer)
 
 	healthServer := health.NewHealthServer()
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
@@ -132,7 +132,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	logger.L.Info("shutting_down_streambridge")
+	logger.L.Info("shutting_down_audio-gateway")
 
 	// Gracefully drain active gRPC streams with fallback timeout
 	stopped := make(chan struct{})
@@ -158,5 +158,5 @@ func main() {
 	defer cancel()
 	_ = httpServer.Shutdown(ctx)
 
-	logger.L.Info("streambridge_shutdown_complete")
+	logger.L.Info("audio_gateway_shutdown_complete")
 }

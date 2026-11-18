@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoohooshantanu/streambridge/internal/logger"
-	"github.com/yoohooshantanu/streambridge/internal/pb"
+	"github.com/yoohooshantanu/audio-gateway/internal/logger"
+	"github.com/yoohooshantanu/audio-gateway/internal/pb"
 	"google.golang.org/grpc/metadata"
 )
 
-func BenchmarkStreamBridgeThroughput(b *testing.B) {
+func BenchmarkAudioGatewayThroughput(b *testing.B) {
 	lis := setupTestHarnessBench(b)
 
 	ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "sb_test_key_123")
@@ -57,7 +57,7 @@ func BenchmarkConcurrentStreamsWithGaps(b *testing.B) {
 	ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "sb_test_key_123")
 
 	// Pre-generate deterministic scrambled sequence orders using fixed seed 42
-	// to isolate streambridge reassembly & processing overhead from RNG calls.
+	// to isolate audio-gateway reassembly & processing overhead from RNG calls.
 	rnd := rand.New(rand.NewSource(42))
 	const numConcurrentCalls = 20
 	const chunksPerCall = 8

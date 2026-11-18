@@ -9,10 +9,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/yoohooshantanu/streambridge/internal/logger"
-	"github.com/yoohooshantanu/streambridge/internal/metrics"
-	"github.com/yoohooshantanu/streambridge/internal/pb"
-	"github.com/yoohooshantanu/streambridge/internal/router"
+	"github.com/yoohooshantanu/audio-gateway/internal/logger"
+	"github.com/yoohooshantanu/audio-gateway/internal/metrics"
+	"github.com/yoohooshantanu/audio-gateway/internal/pb"
+	"github.com/yoohooshantanu/audio-gateway/internal/router"
 )
 
 const (

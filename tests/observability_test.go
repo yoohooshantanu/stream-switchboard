@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	"github.com/yoohooshantanu/streambridge/internal/logger"
-	"github.com/yoohooshantanu/streambridge/internal/metrics"
-	"github.com/yoohooshantanu/streambridge/internal/pb"
+	"github.com/yoohooshantanu/audio-gateway/internal/logger"
+	"github.com/yoohooshantanu/audio-gateway/internal/metrics"
+	"github.com/yoohooshantanu/audio-gateway/internal/pb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -66,19 +66,19 @@ func TestPrometheusOfficialMetricsRegistered(t *testing.T) {
 	bodyStr := string(body)
 
 	requiredMetrics := []string{
-		"streambridge_active_streams",
-		"streambridge_active_watchers",
-		"streambridge_worker_queue_depth",
-		"streambridge_sequence_gap_timeouts_total",
-		"streambridge_duplicate_frames_dropped_total",
-		"streambridge_late_frames_tombstone_dropped_total",
-		"streambridge_audio_packets_total",
-		"streambridge_audio_bytes_total",
-		"streambridge_events_emitted_total",
-		"streambridge_events_dropped_total",
-		"streambridge_grpc_requests_total",
-		"streambridge_packet_queue_wait_seconds",
-		"streambridge_packet_processing_seconds",
+		"audio_gateway_active_streams",
+		"audio_gateway_active_watchers",
+		"audio_gateway_worker_queue_depth",
+		"audio_gateway_sequence_gap_timeouts_total",
+		"audio_gateway_duplicate_frames_dropped_total",
+		"audio_gateway_late_frames_tombstone_dropped_total",
+		"audio_gateway_audio_packets_total",
+		"audio_gateway_audio_bytes_total",
+		"audio_gateway_events_emitted_total",
+		"audio_gateway_events_dropped_total",
+		"audio_gateway_grpc_requests_total",
+		"audio_gateway_packet_queue_wait_seconds",
+		"audio_gateway_packet_processing_seconds",
 	}
 
 	for _, metricName := range requiredMetrics {
@@ -115,7 +115,7 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 
 		// Assert gauge was incremented to at least 1 using testutil
 		if active := testutil.ToFloat64(metrics.DefaultMetrics.ActiveStreamsGauge); active < 1 {
-			t.Fatalf("expected streambridge_active_streams >= 1 during active call, got: %f", active)
+			t.Fatalf("expected audio_gateway_active_streams >= 1 during active call, got: %f", active)
 		}
 
 		// Send final chunk to complete stream gracefully
@@ -143,7 +143,7 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 
 		// Assert gauge decremented back to 0 using testutil
 		if active := testutil.ToFloat64(metrics.DefaultMetrics.ActiveStreamsGauge); active != 0 {
-			t.Fatalf("expected streambridge_active_streams == 0 after normal disconnect, got: %f", active)
+			t.Fatalf("expected audio_gateway_active_streams == 0 after normal disconnect, got: %f", active)
 		}
 	})
 
@@ -188,7 +188,7 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 
 		// Assert gauge decremented back to 0 using testutil
 		if active := testutil.ToFloat64(metrics.DefaultMetrics.ActiveStreamsGauge); active != 0 {
-			t.Fatalf("expected streambridge_active_streams == 0 after gap-timeout abort, got: %f", active)
+			t.Fatalf("expected audio_gateway_active_streams == 0 after gap-timeout abort, got: %f", active)
 		}
 	})
 
@@ -226,7 +226,7 @@ func TestActiveStreamsGaugeDecrementedOnAllExitPaths(t *testing.T) {
 
 		// Assert gauge decremented back to 0 despite panic using testutil
 		if active := testutil.ToFloat64(metrics.DefaultMetrics.ActiveStreamsGauge); active != 0 {
-			t.Fatalf("expected streambridge_active_streams == 0 after panic recovery, got: %f", active)
+			t.Fatalf("expected audio_gateway_active_streams == 0 after panic recovery, got: %f", active)
 		}
 	})
 }
@@ -330,7 +330,7 @@ func TestCardinalitySafety1000CallsConstantSeriesCount(t *testing.T) {
 		count := 0
 		for _, line := range strings.Split(exposition, "\n") {
 			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") && strings.HasPrefix(line, "streambridge_") {
+			if line != "" && !strings.HasPrefix(line, "#") && strings.HasPrefix(line, "audio_gateway_") {
 				count++
 			}
 		}
@@ -421,10 +421,10 @@ func TestSubMillisecondPacketLatencyHistograms(t *testing.T) {
 	body := w.Body.String()
 
 	expectedSubMsBuckets := []string{
-		`streambridge_packet_processing_seconds_bucket{le="0.0005"}`,
-		`streambridge_packet_processing_seconds_bucket{le="0.001"}`,
-		`streambridge_packet_queue_wait_seconds_bucket{le="0.0005"}`,
-		`streambridge_packet_queue_wait_seconds_bucket{le="0.001"}`,
+		`audio_gateway_packet_processing_seconds_bucket{le="0.0005"}`,
+		`audio_gateway_packet_processing_seconds_bucket{le="0.001"}`,
+		`audio_gateway_packet_queue_wait_seconds_bucket{le="0.0005"}`,
+		`audio_gateway_packet_queue_wait_seconds_bucket{le="0.001"}`,
 	}
 
 	for _, bucket := range expectedSubMsBuckets {
