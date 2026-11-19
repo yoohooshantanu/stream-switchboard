@@ -6,5 +6,5 @@ coverage.txt
 .DS_Store
 *.log
 *.pprof
-loadtest_profiles/
-loadtest_profiles*/
+loadtest_profiles/*.pprof
+!loadtest_profiles/raw_loadtest_output.txt

@@ -171,7 +171,7 @@ type CallEvent struct {
 	unknownFields protoimpl.UnknownFields
 
 	CallId    string    `protobuf:"bytes,1,opt,name=call_id,json=callId,proto3" json:"call_id,omitempty"`
-	Type      EventType `protobuf:"varint,2,opt,name=type,proto3,enum=audio-gateway.v1.EventType" json:"type,omitempty"`
+	Type      EventType `protobuf:"varint,2,opt,name=type,proto3,enum=audiogateway.v1.EventType" json:"type,omitempty"`
 	Payload   string    `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
 	Sequence  uint64    `protobuf:"varint,4,opt,name=sequence,proto3" json:"sequence,omitempty"`
 	Timestamp int64     `protobuf:"varint,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
@@ -554,21 +554,21 @@ func file_audio_gateway_proto_rawDescGZIP() []byte {
 var file_audio_gateway_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_audio_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_audio_gateway_proto_goTypes = []any{
-	(EventType)(0),         // 0: audio-gateway.v1.EventType
-	(*AudioChunk)(nil),     // 1: audio-gateway.v1.AudioChunk
-	(*CallEvent)(nil),      // 2: audio-gateway.v1.CallEvent
-	(*WatchRequest)(nil),   // 3: audio-gateway.v1.WatchRequest
-	(*SummaryRequest)(nil), // 4: audio-gateway.v1.SummaryRequest
-	(*CallSummary)(nil),    // 5: audio-gateway.v1.CallSummary
+	(EventType)(0),         // 0: audiogateway.v1.EventType
+	(*AudioChunk)(nil),     // 1: audiogateway.v1.AudioChunk
+	(*CallEvent)(nil),      // 2: audiogateway.v1.CallEvent
+	(*WatchRequest)(nil),   // 3: audiogateway.v1.WatchRequest
+	(*SummaryRequest)(nil), // 4: audiogateway.v1.SummaryRequest
+	(*CallSummary)(nil),    // 5: audiogateway.v1.CallSummary
 }
 var file_audio_gateway_proto_depIdxs = []int32{
-	0, // 0: audio-gateway.v1.CallEvent.type:type_name -> audio-gateway.v1.EventType
-	1, // 1: audio-gateway.v1.AudioGateway.StreamCall:input_type -> audio-gateway.v1.AudioChunk
-	3, // 2: audio-gateway.v1.AudioGateway.WatchCall:input_type -> audio-gateway.v1.WatchRequest
-	4, // 3: audio-gateway.v1.AudioGateway.GetCallSummary:input_type -> audio-gateway.v1.SummaryRequest
-	2, // 4: audio-gateway.v1.AudioGateway.StreamCall:output_type -> audio-gateway.v1.CallEvent
-	2, // 5: audio-gateway.v1.AudioGateway.WatchCall:output_type -> audio-gateway.v1.CallEvent
-	5, // 6: audio-gateway.v1.AudioGateway.GetCallSummary:output_type -> audio-gateway.v1.CallSummary
+	0, // 0: audiogateway.v1.CallEvent.type:type_name -> audiogateway.v1.EventType
+	1, // 1: audiogateway.v1.AudioGateway.StreamCall:input_type -> audiogateway.v1.AudioChunk
+	3, // 2: audiogateway.v1.AudioGateway.WatchCall:input_type -> audiogateway.v1.WatchRequest
+	4, // 3: audiogateway.v1.AudioGateway.GetCallSummary:input_type -> audiogateway.v1.SummaryRequest
+	2, // 4: audiogateway.v1.AudioGateway.StreamCall:output_type -> audiogateway.v1.CallEvent
+	2, // 5: audiogateway.v1.AudioGateway.WatchCall:output_type -> audiogateway.v1.CallEvent
+	5, // 6: audiogateway.v1.AudioGateway.GetCallSummary:output_type -> audiogateway.v1.CallSummary
 	4, // [4:7] is the sub-list for method output_type
 	1, // [1:4] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name

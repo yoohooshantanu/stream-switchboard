@@ -12,6 +12,8 @@ services:
     environment:
       - GRPC_PORT=50051
       - HTTP_PORT=8083
+      - HTTP_HOST=0.0.0.0
+      - STREAMBRIDGE_API_KEY=sb_production_key
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "/audio-gateway", "-healthcheck"]

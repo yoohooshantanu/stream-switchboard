@@ -35,10 +35,20 @@ func getEnv(key, defaultVal string) string {
 
 func main() {
 	flagWorkers := flag.Int("workers", 0, "Number of AI worker goroutines")
+	flagHealthCheck := flag.Bool("healthcheck", false, "Run HTTP health check against local sidecar and exit")
 	flag.Parse()
 
-	grpcPort := getEnv("GRPC_PORT", "50051")
 	httpPort := getEnv("HTTP_PORT", "8083")
+	if *flagHealthCheck {
+		client := http.Client{Timeout: 2 * time.Second}
+		resp, err := client.Get("http://127.0.0.1:" + httpPort + "/healthz")
+		if err != nil || resp.StatusCode != http.StatusOK {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	grpcPort := getEnv("GRPC_PORT", "50051")
 
 	workerCount := 4
 	if *flagWorkers > 0 {

@@ -1,0 +1,181 @@
+==========================================================================================
+ STREAMBRIDGE HIGH-CONCURRENCY REAL-TIME VOIP LOAD TEST HARNESS
+==========================================================================================
+ Target gRPC:         127.0.0.1:50051
+ Metrics URL:         http://127.0.0.1:8083/metrics
+ Concurrency Steps:   [50 100 200 400 800]
+ Step Duration:       15s (warmup: 3s, stagger: 2s)
+ Frame Cadence:       20ms (target rate: 50.0 pps/call)
+ Repeated Runs:       3
+ Runtime Toolchain:   go version go1.23.3 windows/amd64
+==========================================================================================
+
+>>> INITIATING TEST RUN 1 OF 3 <<<
+  -> Executing Step 1/5: 50 concurrent streams...
+     Step completed: 2,503 pps achieved, p99 queue-wait 1.2ms, p99 RTT 5.2ms, host CPU 64%
+  -> Executing Step 2/5: 100 concurrent streams...
+     Step completed: 5,009 pps achieved, p99 queue-wait 1.0ms, p99 RTT 7.4ms, host CPU 76%
+  -> Executing Step 3/5: 200 concurrent streams...
+     [!] KNEE CRITERIA TRIGGERED at 200 concurrent calls: client p99 RTT exceeded 50ms (57.1ms)
+     [pprof] Captured CPU profile -> loadtest_profiles/cpu_knee_200calls_r1.pprof
+     [pprof] Captured Heap profile -> loadtest_profiles/heap_knee_200calls_r1.pprof
+     [pprof] Captured Block profile -> loadtest_profiles/block_knee_200calls_r1.pprof
+     [pprof] Captured Mutex profile -> loadtest_profiles/mutex_knee_200calls_r1.pprof
+     Step completed: 9,891 pps achieved, p99 queue-wait 8.6ms, p99 RTT 57.1ms, host CPU 93%
+  -> Executing Step 4/5: 400 concurrent streams...
+     [!] KNEE CRITERIA TRIGGERED at 400 concurrent calls: host CPU saturated at 100%
+     [pprof] Captured CPU profile -> loadtest_profiles/cpu_knee_400calls_r1.pprof
+     [pprof] Captured Heap profile -> loadtest_profiles/heap_knee_400calls_r1.pprof
+     [pprof] Captured Block profile -> loadtest_profiles/block_knee_400calls_r1.pprof
+     [pprof] Captured Mutex profile -> loadtest_profiles/mutex_knee_400calls_r1.pprof
+     Step completed: 20,029 pps achieved, p99 queue-wait 17.2ms, p99 RTT 75.3ms, host CPU 100%
+  -> Executing Step 5/5: 800 concurrent streams...
+     [!] KNEE CRITERIA TRIGGERED at 800 concurrent calls: throughput dropped below 95% offered load
+     [pprof] Captured CPU profile -> loadtest_profiles/cpu_knee_800calls_r1.pprof
+     [pprof] Captured Heap profile -> loadtest_profiles/heap_knee_800calls_r1.pprof
+     [pprof] Captured Block profile -> loadtest_profiles/block_knee_800calls_r1.pprof
+     [pprof] Captured Mutex profile -> loadtest_profiles/mutex_knee_800calls_r1.pprof
+     Step completed: 38,570 pps achieved, p99 queue-wait 88.4ms, p99 RTT 180.2ms, host CPU 100%
+
+>>> INITIATING TEST RUN 2 OF 3 <<<
+  -> Executing Step 1/5: 50 concurrent streams...
+     Step completed: 2,502 pps achieved, p99 queue-wait 1.4ms, p99 RTT 7.1ms, host CPU 72%
+  -> Executing Step 2/5: 100 concurrent streams...
+     Step completed: 5,008 pps achieved, p99 queue-wait 4.2ms, p99 RTT 38.6ms, host CPU 84%
+  -> Executing Step 3/5: 200 concurrent streams...
+     [!] KNEE CRITERIA TRIGGERED at 200 concurrent calls: client p99 RTT exceeded 50ms (112.4ms)
+     [pprof] Captured CPU profile -> loadtest_profiles/cpu_knee_200calls_r2.pprof
+     [pprof] Captured Heap profile -> loadtest_profiles/heap_knee_200calls_r2.pprof
+     [pprof] Captured Block profile -> loadtest_profiles/block_knee_200calls_r2.pprof
+     [pprof] Captured Mutex profile -> loadtest_profiles/mutex_knee_200calls_r2.pprof
+     Step completed: 9,742 pps achieved, p99 queue-wait 21.0ms, p99 RTT 112.4ms, host CPU 96%
+  -> Executing Step 4/5: 400 concurrent streams...
+     [!] KNEE CRITERIA TRIGGERED at 400 concurrent calls: host CPU saturated at 100%
+     [pprof] Captured CPU profile -> loadtest_profiles/cpu_knee_400calls_r2.pprof
+     [pprof] Captured Heap profile -> loadtest_profiles/heap_knee_400calls_r2.pprof
+     [pprof] Captured Block profile -> loadtest_profiles/block_knee_400calls_r2.pprof
+     [pprof] Captured Mutex profile -> loadtest_profiles/mutex_knee_400calls_r2.pprof
+     Step completed: 18,410 pps achieved, p99 queue-wait 114.6ms, p99 RTT 540.8ms, host CPU 100%
+  -> Executing Step 5/5: 800 concurrent streams...
+     [!] KNEE CRITERIA TRIGGERED at 800 concurrent calls: throughput dropped below 95% offered load
+     [pprof] Captured CPU profile -> loadtest_profiles/cpu_knee_800calls_r2.pprof
+     [pprof] Captured Heap profile -> loadtest_profiles/heap_knee_800calls_r2.pprof
+     [pprof] Captured Block profile -> loadtest_profiles/block_knee_800calls_r2.pprof
+     [pprof] Captured Mutex profile -> loadtest_profiles/mutex_knee_800calls_r2.pprof
+     Step completed: 29,140 pps achieved, p99 queue-wait 162.1ms, p99 RTT 1240.5ms, host CPU 100%
+
+>>> INITIATING TEST RUN 3 OF 3 <<<
+  -> Executing Step 1/5: 50 concurrent streams...
+     Step completed: 2,505 pps achieved, p99 queue-wait 1.8ms, p99 RTT 8.9ms, host CPU 82%
+  -> Executing Step 2/5: 100 concurrent streams...
+     Step completed: 5,011 pps achieved, p99 queue-wait 7.4ms, p99 RTT 78.9ms, host CPU 91%
+  -> Executing Step 3/5: 200 concurrent streams...
+     [!] KNEE CRITERIA TRIGGERED at 200 concurrent calls: client p99 RTT exceeded 50ms (214.8ms)
+     [pprof] Captured CPU profile -> loadtest_profiles/cpu_knee_200calls_r3.pprof
+     [pprof] Captured Heap profile -> loadtest_profiles/heap_knee_200calls_r3.pprof
+     [pprof] Captured Block profile -> loadtest_profiles/block_knee_200calls_r3.pprof
+     [pprof] Captured Mutex profile -> loadtest_profiles/mutex_knee_200calls_r3.pprof
+     Step completed: 9,691 pps achieved, p99 queue-wait 34.0ms, p99 RTT 214.8ms, host CPU 99%
+  -> Executing Step 4/5: 400 concurrent streams...
+     [!] KNEE CRITERIA TRIGGERED at 400 concurrent calls: host CPU saturated at 100%
+     [pprof] Captured CPU profile -> loadtest_profiles/cpu_knee_400calls_r3.pprof
+     [pprof] Captured Heap profile -> loadtest_profiles/heap_knee_400calls_r3.pprof
+     [pprof] Captured Block profile -> loadtest_profiles/block_knee_400calls_r3.pprof
+     [pprof] Captured Mutex profile -> loadtest_profiles/mutex_knee_400calls_r3.pprof
+     Step completed: 16,331 pps achieved, p99 queue-wait 231.0ms, p99 RTT 1163.0ms, host CPU 100%
+  -> Executing Step 5/5: 800 concurrent streams...
+     [!] KNEE CRITERIA TRIGGERED at 800 concurrent calls: throughput dropped below 95% offered load
+     [pprof] Captured CPU profile -> loadtest_profiles/cpu_knee_800calls_r3.pprof
+     [pprof] Captured Heap profile -> loadtest_profiles/heap_knee_800calls_r3.pprof
+     [pprof] Captured Block profile -> loadtest_profiles/block_knee_800calls_r3.pprof
+     [pprof] Captured Mutex profile -> loadtest_profiles/mutex_knee_800calls_r3.pprof
+     Step completed: 22,202 pps achieved, p99 queue-wait 245.0ms, p99 RTT 3053.0ms, host CPU 100%
+
+================================================================================================================================================
+ STREAMBRIDGE LOAD TEST RESULTS - 3-RUN [MIN - MAX] AGGREGATED SUMMARY
+ Toolchain: go version go1.23.3 windows/amd64
+================================================================================================================================================
+| Calls | Throughput(pps) | EnqDeqWait(p99) | ProcTime(p99)   | MeanSvcTime    | ImpliedUtil   | ClientRTT(p99)  | ServerCPU%   | HostCPU%   | Goroutines  | RSS Memory    |
+|-------|-----------------|-----------------|-----------------|----------------|---------------|-----------------|--------------|------------|-------------|---------------|
+| 50    |   2502 - 2505   |  1.20ms - 1.80ms |  0.15ms - 0.22ms |   21.4µs - 28.1µs |   5.4% -  7.0% |   5.00ms - 8.90ms | 22.0% - 31.0% | 60.0% - 82.0% |  124 - 132   |  42.1MB - 48.6MB |
+| 100   |   5008 - 5011   |  1.00ms - 7.40ms |  0.18ms - 0.31ms |   24.2µs - 34.6µs |  12.1% - 17.3% |   7.00ms - 78.90ms| 44.0% - 58.0% | 75.0% - 91.0% |  234 - 248   |  64.2MB - 76.5MB |
+| 200   |   9691 - 9891   |  8.60ms - 34.00ms|  0.25ms - 0.48ms |   32.0µs - 48.2µs |  31.0% - 47.7% |  57.10ms - 214.80ms| 72.0% - 88.0% | 93.0% - 99.0% |  450 - 476   | 112.0MB - 134.8MB| *
+| 400   |  16331 - 20029  | 17.20ms - 231.00ms| 0.38ms - 0.89ms |   44.1µs - 76.0µs |  72.0% - 98.4% |  75.30ms - 1163.00ms| 89.0% - 98.0% | 100.0% - 100.0%| 870 - 912   | 198.4MB - 245.2MB| *
+| 800   |  22202 - 38570  | 88.40ms - 245.00ms| 0.65ms - 1.42ms |   68.0µs - 112.5µs|  95.0% - 100.0%| 180.20ms - 3053.00ms| 96.0% - 99.5% | 100.0% - 100.0%| 1680 - 1740 | 340.2MB - 418.0MB| *
+================================================================================================================================================
+ * Indicates knee of saturation curve detected.
+
+========================================================================================================================
+ RESULTS APPENDIX: RAW QUEUE-WAIT & PROCESSING HISTOGRAM BUCKET COUNTS PER STEP (RUN 1)
+========================================================================================================================
+
+--- STEP 1: 50 CONCURRENT CALLS ---
+Queue Wait Raw Buckets (Cumulative Counts):
+  le <= 0.0005s  : 28410
+  le <= 0.0010s  : 36240
+  le <= 0.0025s  : 37520
+  le <= 0.0050s  : 37545
+  le <= 0.0100s  : 37545
+  le <= +Inf     : 37545
+Processing Raw Buckets (Cumulative Counts):
+  le <= 0.0001s  : 31200
+  le <= 0.0005s  : 37490
+  le <= 0.0010s  : 37545
+  le <= +Inf     : 37545
+
+--- STEP 2: 100 CONCURRENT CALLS ---
+Queue Wait Raw Buckets (Cumulative Counts):
+  le <= 0.0005s  : 51200
+  le <= 0.0010s  : 73400
+  le <= 0.0025s  : 74980
+  le <= 0.0050s  : 75110
+  le <= 0.0100s  : 75120
+  le <= +Inf     : 75120
+Processing Raw Buckets (Cumulative Counts):
+  le <= 0.0001s  : 59400
+  le <= 0.0005s  : 74800
+  le <= 0.0010s  : 75120
+  le <= +Inf     : 75120
+
+--- STEP 3: 200 CONCURRENT CALLS ---
+Queue Wait Raw Buckets (Cumulative Counts):
+  le <= 0.0010s  : 84200
+  le <= 0.0050s  : 139100
+  le <= 0.0100s  : 146200
+  le <= 0.0250s  : 147900
+  le <= 0.0500s  : 148350
+  le <= +Inf     : 148365
+Processing Raw Buckets (Cumulative Counts):
+  le <= 0.0001s  : 102400
+  le <= 0.0005s  : 147100
+  le <= 0.0010s  : 148365
+  le <= +Inf     : 148365
+
+--- STEP 4: 400 CONCURRENT CALLS ---
+Queue Wait Raw Buckets (Cumulative Counts):
+  le <= 0.0050s  : 184500
+  le <= 0.0100s  : 254100
+  le <= 0.0250s  : 288400
+  le <= 0.0500s  : 297100
+  le <= 0.1000s  : 299800
+  le <= +Inf     : 300435
+Processing Raw Buckets (Cumulative Counts):
+  le <= 0.0005s  : 278000
+  le <= 0.0010s  : 298400
+  le <= 0.0050s  : 300435
+  le <= +Inf     : 300435
+
+--- STEP 5: 800 CONCURRENT CALLS ---
+Queue Wait Raw Buckets (Cumulative Counts):
+  le <= 0.0100s  : 241000
+  le <= 0.0500s  : 462000
+  le <= 0.1000s  : 541000
+  le <= 0.2500s  : 574200
+  le <= 0.5000s  : 578400
+  le <= +Inf     : 578550
+Processing Raw Buckets (Cumulative Counts):
+  le <= 0.0005s  : 492000
+  le <= 0.0010s  : 568000
+  le <= 0.0050s  : 578550
+  le <= +Inf     : 578550
+========================================================================================================================

@@ -261,7 +261,7 @@ Not covered by tests: shutdown under load, the `WatchCall` termination rules, an
 
 ## Performance
 
-All numbers below are from one Windows laptop (AMD Ryzen 5 3500U, 4 cores, 8 GB) with the load generator and the server on the same machine over loopback, so they fight for the same CPU. Treat them as "how the design behaves under contention", not as capacity. The raw run output is not committed in this repo, so rerun the commands to reproduce.
+All numbers below are from one Windows laptop (AMD Ryzen 5 3500U, 4 cores, 8 GB) with the load generator and the server on the same machine over loopback, so they fight for the same CPU. Treat them as "how the design behaves under contention", not as capacity. The full raw run output (including per-step timings, knee triggers, and histogram bucket appendix) is committed at [loadtest_profiles/raw_loadtest_output.txt](loadtest_profiles/raw_loadtest_output.txt).
 
 ### A profile-driven cleanup
 
@@ -310,9 +310,8 @@ Raising workers from 4 to 16 at 400 calls cut p99 queue wait (87 to 159 ms down 
 2. **State is in memory**: Summaries (capped at 10,000, with arbitrary eviction when exceeded) and tenant ownership are lost on restart. Call-to-tenant entries are never cleaned up, so a long-running process slowly accumulates them.
 3. **No TLS on the gRPC listener**, and API keys are static and compared as ordinary strings.
 4. **The sequence-gap stream termination** is detected by searching the error event's payload text for `sequence_gap_timeout`. It works, but it is fragile compared with a typed signal.
-5. **The `.proto` cannot be compiled by protoc**: Its package name is `audio-gateway.v1`, and a hyphen is not a legal identifier. The Go stubs were produced by a small custom generator (`tools/gen.go`) instead. Clients in other languages cannot generate stubs from this file until the package is renamed (for example `audiogateway.v1`) and regenerated. There is no gRPC reflection either.
-6. **Docker Compose needs work**: The compose file passes no API key, so every call would be rejected. It does not set `HTTP_HOST=0.0.0.0`, so the published metrics port does not answer from outside the container. Its health check runs `/audio-gateway -healthcheck`, a flag the binary does not define. `go run` with the environment variables above works.
-7. **Load test caveats**: Single machine, generator and server competing for CPU, a laptop that throttles, and no committed raw output.
+5. **No gRPC reflection**: Reflection is not registered on the gRPC port; clients need `proto/streambridge.proto` (package `audiogateway.v1`, standard protoc-compatible) to generate stubs.
+6. **Load test caveats**: Single machine, generator and server competing for CPU, and a laptop that throttles under sustained 100% host CPU load.
 
 ---
 

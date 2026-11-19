@@ -19,9 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AudioGateway_StreamCall_FullMethodName     = "/audio-gateway.v1.AudioGateway/StreamCall"
-	AudioGateway_WatchCall_FullMethodName      = "/audio-gateway.v1.AudioGateway/WatchCall"
-	AudioGateway_GetCallSummary_FullMethodName = "/audio-gateway.v1.AudioGateway/GetCallSummary"
+	AudioGateway_StreamCall_FullMethodName     = "/audiogateway.v1.AudioGateway/StreamCall"
+	AudioGateway_WatchCall_FullMethodName      = "/audiogateway.v1.AudioGateway/WatchCall"
+	AudioGateway_GetCallSummary_FullMethodName = "/audiogateway.v1.AudioGateway/GetCallSummary"
 )
 
 // AudioGatewayClient is the client API for AudioGateway service.
@@ -164,7 +164,7 @@ func _AudioGateway_GetCallSummary_Handler(srv any, ctx context.Context, dec func
 }
 
 var AudioGateway_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "audio-gateway.v1.AudioGateway",
+	ServiceName: "audiogateway.v1.AudioGateway",
 	HandlerType: (*AudioGatewayServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{

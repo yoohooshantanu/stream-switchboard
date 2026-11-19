@@ -15,7 +15,7 @@ func strPtr(s string) *string { return &s }
 func int32Ptr(i int32) *int32 { return &i }
 
 func main() {
-	protoPackage := "audio-gateway.v1"
+	protoPackage := "audiogateway.v1"
 	fileName := "audio_gateway.proto"
 
 	fd := &descriptorpb.FileDescriptorProto{
@@ -853,7 +853,7 @@ func _AudioGateway_GetCallSummary_Handler(srv any, ctx context.Context, dec func
 }
 
 var AudioGateway_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "audio-gateway.v1.AudioGateway",
+	ServiceName: "audiogateway.v1.AudioGateway",
 	HandlerType: (*AudioGatewayServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
