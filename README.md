@@ -1,12 +1,12 @@
-# AudioGateway
+# StreamSwitchboard
 
-[![CI](https://github.com/yoohooshantanu/streambridge/actions/workflows/ci.yml/badge.svg)](https://github.com/yoohooshantanu/streambridge/actions)
+[![CI](https://github.com/yoohooshantanu/stream-switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/yoohooshantanu/stream-switchboard/actions)
 ![Go](https://img.shields.io/badge/Go-1.23%2B-00ADD8)
 ![gRPC](https://img.shields.io/badge/gRPC-bidi%20streaming-244c5a)
 
 A gRPC gateway that takes live call audio in, hands it to AI workers, and streams the results back out to the caller and to anyone watching. Think of it as the switchboard in front of a speech pipeline: it does not understand speech, it makes sure frames arrive in order, results go to the right people, and one noisy call cannot hurt another.
 
-*(The GitHub repo is called streambridge. The Go module, the binary, the gRPC service and the metrics are all named audio-gateway from a later rename.)*
+
 
 ---
 
@@ -177,8 +177,8 @@ Defined in `proto/streambridge.proto`:
 ## Run it
 
 ```bash
-git clone https://github.com/yoohooshantanu/streambridge
-cd streambridge
+git clone https://github.com/yoohooshantanu/stream-switchboard
+cd stream-switchboard
 export STREAMBRIDGE_API_KEYS="dev_key:tenant_dev"
 go run ./cmd/server
 # gRPC on :50051, HTTP sidecar on 127.0.0.1:8083
