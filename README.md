@@ -1,487 +1,340 @@
 # AudioGateway
 
-[![AudioGateway CI](https://github.com/yoohooshantanu/audio-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/yoohooshantanu/audio-gateway/actions)
-[![Go Report Card](https://goreportcard.com/badge/github.com/yoohooshantanu/audio-gateway)](https://goreportcard.com/report/github.com/yoohooshantanu/audio-gateway)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/yoohooshantanu/streambridge/actions/workflows/ci.yml/badge.svg)](https://github.com/yoohooshantanu/streambridge/actions)
+![Go](https://img.shields.io/badge/Go-1.23%2B-00ADD8)
+![gRPC](https://img.shields.io/badge/gRPC-bidi%20streaming-244c5a)
 
-**AudioGateway** is a high-throughput, low-latency gRPC bidirectional streaming gateway engineered for real-time telephony and AI voice processing infrastructure. It ingests streaming audio frames from callers, coordinates concurrent AI workers (ASR transcription, real-time sentiment analysis, intent classification), and fans out live event streams to external watchers (CRMs, supervisor dashboards, analytics sinks).
+A gRPC gateway that takes live call audio in, hands it to AI workers, and streams the results back out to the caller and to anyone watching. Think of it as the switchboard in front of a speech pipeline: it does not understand speech, it makes sure frames arrive in order, results go to the right people, and one noisy call cannot hurt another.
 
----
-
-## Key Capabilities
-
-* **Bidirectional gRPC Streaming (`StreamCall`)**: Full duplex client-to-server and server-to-client streaming over HTTP/2 with independent goroutine isolation for `Recv()` and `Send()`.
-* **Hash-Partitioned Worker Queues & Serial Chunk Ordering**: Partitioned actor channels keyed by `callID` (`hash(callID) % numWorkers`) eliminate cross-worker lock contention and strictly serialize chunk processing per call.
-* **Per-Call Sequencing & Reassembly**: Monotonic sequence tracking (`nextExpectedSeq`) buffers out-of-order frames, guaranteeing that finalization (`is_final = true`) never races ahead of preceding frames.
-* **Multi-Tenant Isolation**: Rigorous tenant ownership binding in `EventRouter` prevents cross-tenant access. Subscriptions (`WatchCall`) and post-call analytics (`GetCallSummary`) reject cross-tenant snooping with `codes.PermissionDenied`.
-* **Zero-Wildcard Authentication Registry**: Centralized `KeyRegistry` binds authorized keys to tenant identities with zero prefix wildcards (eliminating prefix-based bypass risks).
-* **Server-Side Event Fan-Out (`WatchCall`)**: Multi-tenant event hub enabling external services to observe live telephony streams with zero impact on caller stream latency.
-* **Non-Blocking Backpressure Protection**: Bounded subscriber ring buffers with non-blocking drops to prevent slow consumers from lagging upstream voice pipelines.
-* **Hermetic Testing via In-Memory `bufconn`**: 100% network-socket-free unit and integration test suite executing full gRPC interceptor chains without OS port allocation conflicts.
-* **Zero-Allocation Telemetry**: Live Prometheus exposition (`/metrics`), `/healthz`, and runtime profiling (`net/http/pprof`) via an isolated HTTP sidecar.
+*(The GitHub repo is called streambridge. The Go module, the binary, the gRPC service and the metrics are all named audio-gateway from a later rename.)*
 
 ---
 
-## Architectural Scope & Deterministic AI Engines
+## Contents
 
-> [!NOTE]
-> **Transport Architecture vs. Model Inference**: AudioGateway is designed as a carrier-grade streaming network gateway focusing on bidirectional framing, backpressure handling, fan-out distribution, and tenant isolation.
->
-> The built-in worker processors (ASR streaming transcriber, sentiment analyzer, and intent detector) are **deterministic in-memory streaming mock engines**. This architectural separation allows high-throughput performance benchmarking, hermetic integration testing, and predictable pipeline latency without external GPU clusters, network egress overhead, or third-party SaaS API credits. In production environments, these worker routines act as adapters forwarding raw frames to proprietary or vendor ASR/LLM inference endpoints.
-
----
-
-## System Architecture
-
-```
-                       ┌──────────────────────────────────────────────────────────┐
-                       │                       AudioGateway                       │
-                       │                                                          │
-Telephony Client ─────►│  gRPC Server (:50051)                                    │
-(AudioChunk stream)    │    ├─ UnaryAuthInterceptor & StreamAuthInterceptor       │
-                       │    │    └─► KeyRegistry (Strict Tenant Binding)          │
-                       │    └─ Logging & Metrics Interceptors                     │
-                       │                                                          │
-                       │  StreamCall Handler (Bidirectional)                      │
-                       │    ├─ Goroutine A: stream.Recv() loop (Ingests to EOF)   │
-                       │    │    └─► Submit(hash(callID) % numWorkers)            │
-                       │    │                                                     │
-                       │    └─ Goroutine B: stream.Send() loop                   │
-                       │         ▲                                                │
-                       │         │                                                │
-                       │  EventRouter (Tenant-Isolated Fan-Out Hub) ──────────────┼───┐
-                       │    ├─ callTenants map[callID]tenantID                    │   │
-                       │    ├─ Subscribers map[callID][]chan CallEvent            │   │
-                       │    └─ Non-blocking select (backpressure drop)            │   │
-                       │                                                          │   │
-                       │  AIWorkerPool (Hash-Partitioned Workers)                 │   │
-                       │    ├─ Worker 0..N-1 (Dedicated Per-Worker Queues)        │   │
-                       │    ├─ Out-of-Order Sequence Reassembly Buffer            │   │
-                       │    ├─ ASR Engine (Partial / Final transcripts) ──────────┤   │
-                       │    ├─ Sentiment Analyzer (Positive/Neutral) ─────────────┤   │
-                       │    └─ Intent Classifier (Inquiry/Booking) ───────────────┘   │
-                       │                                                          │
-Supervisor / CRM ─────►│  WatchCall Handler (Server Streaming)                   │
-(WatchRequest)         │    └─ Enforces Tenant ID Match (codes.PermissionDenied)  │
-                       └──────────────────────────────────────────────────────────┘
-                                                 │
-                               HTTP Sidecar (:8083) ──► /metrics, /healthz, pprof
-```
+- [The idea in two minutes](#the-idea-in-two-minutes)
+- [What is real and what is mocked](#what-is-real-and-what-is-mocked)
+- [Architecture](#architecture)
+- [The pieces, one by one](#the-pieces-one-by-one)
+- [Protocol](#protocol)
+- [Run it](#run-it)
+- [Observability](#observability)
+- [Tests](#tests)
+- [Performance](#performance)
+- [Limitations and rough edges](#limitations-and-rough-edges)
+- [Repo map](#repo-map)
 
 ---
 
-## gRPC Protocol Specification (`proto/audio_gateway.proto`)
+## The idea in two minutes
 
-```protobuf
-syntax = "proto3";
+A phone call, to a machine, is a stream of tiny audio packets: 20 ms each, 50 per second. A voice AI backend has to take those packets, run transcription and analysis on them, and send results back while the call is still going. It also has to let other systems (a supervisor dashboard, a CRM) watch the same call live, without slowing the call down.
 
-package audio-gateway.v1;
+Four things go wrong in practice, and each is a design decision in this repo:
+- **Packets arrive out of order or not at all**: The gateway reorders them in a bounded buffer, and gives up on a call that stays stuck.
+- **Two threads writing to one stream corrupt it**: gRPC lets one goroutine receive while another sends, but not two senders. Each call gets exactly one of each.
+- **A slow watcher must not slow the caller**: Watchers get a small buffer. If it fills up, their events are dropped and counted. The call never waits.
+- **Tenant A must never see tenant B's call**: Every call is bound to the tenant that opened it, and every read path checks.
 
-option go_package = "github.com/yoohooshantanu/audio-gateway/internal/pb";
+It is also built so that one call's work always lands on the same worker goroutine. That worker owns the call's state outright, so the hot path takes no per-call locks.
 
-service AudioGateway {
-  rpc StreamCall(stream AudioChunk) returns (stream CallEvent);
-  rpc WatchCall(WatchRequest) returns (stream CallEvent);
-  rpc GetCallSummary(SummaryRequest) returns (CallSummary);
-}
+---
 
-message AudioChunk {
-  string call_id   = 1;
-  string tenant_id = 2;
-  uint64 sequence  = 3;
-  bytes  data      = 4;
-  bool   is_final  = 5;
-  int64  timestamp = 6;
-}
+## What is real and what is mocked
 
-message CallEvent {
-  string    call_id   = 1;
-  EventType type      = 2;
-  string    payload   = 3;
-  uint64    sequence  = 4;
-  int64     timestamp = 5;
-}
+| Real | Mocked or simplified |
+| :--- | :--- |
+| Bidirectional gRPC streaming, auth interceptors, tenant binding | The AI. The "transcriber" echoes a canned sentence per frame. Sentiment is a fixed payload every third frame. Intent is a fixed payload at the end of a call. No model runs. |
+| Hash-partitioned worker pool, sequence reassembly, gap timeout, tombstones | Storage. Call summaries and tenant ownership live in process memory. Restart the server and they are gone. |
+| Event router with tenant isolation and backpressure drops | Auth. API keys come from environment variables. There is no TLS on the gRPC port. |
+| Prometheus metrics, health service, pprof | Real audio. Frames are opaque bytes. If a frame's data starts with `text:` the "transcriber" uses the rest as the transcript, which is how the tests feed it speech. |
+| 22 tests plus 4 benchmarks, run with the race detector in CI | This is a transport-and-concurrency project. The model behind the worker is meant to be swapped in later. |
 
-enum EventType {
-  EVENT_UNKNOWN            = 0;
-  EVENT_TRANSCRIPT_PARTIAL = 1;
-  EVENT_TRANSCRIPT_FINAL   = 2;
-  EVENT_SENTIMENT          = 3;
-  EVENT_INTENT_DETECTED    = 4;
-  EVENT_CALL_ENDED         = 5;
-  EVENT_CALL_ERROR         = 6;
-}
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    C["Caller: StreamCall"] -->|"AudioChunk frames"| I["Auth interceptor: x-api-key to tenant"]
+    I --> A["Goroutine A: Recv loop"]
+    A -->|"hash(call_id) mod N"| Q["Worker queues"]
+    Q --> W["Worker i owns its calls: reorder, gap timer, tombstones, mock ASR, sentiment, intent"]
+    W -->|"CallEvent"| R["EventRouter: per-call subscribers, tenant map"]
+    R -->|"buffer 128"| B["Goroutine B: Send loop"]
+    B -->|"CallEvent"| C
+    S["Supervisor or CRM: WatchCall"] -->|"subscribe, tenant check"| R
+    R -->|"buffer 512"| S
+    SC["GetCallSummary"] -->|"tenant check"| R
 ```
 
+Three RPCs: `StreamCall` (bidirectional, the caller), `WatchCall` (server stream, observers), `GetCallSummary` (unary, after the call). A separate HTTP sidecar serves `/healthz`, `/metrics` and, if enabled, pprof.
+
 ---
 
-## Concurrency & Thread-Safety Guarantees
+## The pieces, one by one
 
-### 1. Independent Recv/Send Goroutine Isolation
-In gRPC Go, calling `stream.Send()` and `stream.Recv()` concurrently on the same stream is safe, but calling `stream.Send()` from multiple goroutines concurrently is **unsafe**. `StreamCall` enforces strict isolation:
-- **Goroutine A** exclusively calls `stream.Recv()` and dispatches audio frames into the worker pool.
-- **Goroutine B** exclusively reads from the per-call `eventCh` and calls `stream.Send()`.
-- A shared `doneCh` coordination pattern ensures that whenever either half finishes or errors, the counterpart goroutine drains and terminates cleanly without leaking resources.
+### One reader, one writer per stream (`internal/server`)
 
-### 2. Hash-Partitioned Worker Queues & Bounded Sequence Reassembly
-To eliminate lock contention and race conditions during concurrent audio chunk ingestion:
-- Each worker goroutine in `AIWorkerPool` has an independent, non-shared channel (`workerQueues[workerID]`).
-- Audio chunks are deterministically routed to a specific worker using `hash(callID) % numWorkers`.
-- All chunks for a given call are processed by the exact same worker in strict order.
-- **Bounded Out-of-Order Sequence Reassembly**: An out-of-order sequence reassembly buffer (`pendingChunks map[uint64]*WorkerJob`) holds any frames that arrive ahead of `nextExpectedSeq`. Frames are capped at `MaxPendingChunksPerCall = 64` and `MaxSequenceGap = 128`.
-- **Explicit Caller Notification**: If an incoming frame exceeds the maximum sequence gap or the buffer is saturated, the frame is dropped and the client is immediately notified via an `EVENT_CALL_ERROR` event.
-- **Deterministic Gap Timeout & Eviction**: If a sequence gap remains stalled without the missing frame arriving, the worker's background ticker aborts the stalled session after `DefaultGapTimeout` (2 seconds), emits an `EVENT_CALL_ERROR` with `sequence_gap_timeout`, terminates the gRPC stream with `codes.DataLoss`, and evicts worker session memory to prevent indefinite hanging or memory leakage.
-- **Worker-Local Tombstone Protection (Zombie Session Prevention)**: When a call aborts due to a gap timeout, an entry is recorded in a worker-local `abortedCalls map[string]time.Time` cache (`AbortedCallTombstoneTTL = 60s`, capped at `MaxAbortedTombstones = 1024`). Any delayed or retransmitted audio frames arriving after the abort are dropped immediately without re-instantiating a new session expecting sequence 1.
-  - **Share-Nothing Concurrency**: Because workers exclusively own their partitioned calls via `hash(callID) % numWorkers`, tombstone checking requires zero mutex locks and zero atomic operations.
-  - **Capacity Overflow (FIFO/LRU Eviction)**: When the map reaches 1024 entries, `RecordAbortedCall` evicts the oldest recorded tombstone by timestamp, ensuring newly aborted calls are always protected without memory leakage. The 60-second TTL is an engineered operational window exceeding typical carrier SIP/WebRTC renegotiation and teardown windows.
+`StreamCall` splits each stream into two goroutines:
+- **Goroutine A** is the only one that ever calls `stream.Recv()`: it validates each frame and submits it to the worker pool.
+- **Goroutine B** (the handler goroutine itself) is the only one that ever calls `stream.Send()`: it drains the call's event channel.
 
-### 3. Strict Tenant Isolation & Key Registry
-- Incoming API keys are verified against a strict `KeyRegistry`. Wildcard prefixes (`strings.HasPrefix`) are strictly rejected.
-- Each call is registered to its authenticated tenant.
-- Cross-tenant subscriptions (`WatchCall`) and summary requests (`GetCallSummary`) are rejected with `codes.PermissionDenied`.
+They coordinate through a done channel and an error channel, and a panic in either is recovered into a `codes.Internal` instead of crashing the process.
 
-### 4. Lock Ordering & Send-on-Closed-Channel Prevention
-To prevent `send on closed channel` panics during subscriber churn, `EventRouter.Publish()` holds `r.mu.RLock()` during channel dispatch:
+When the caller finishes sending, goroutine B keeps draining until it sees `EVENT_CALL_ENDED`, so the caller gets its final transcript and the stream ends cleanly. A cancelled context wins over everything. `TestStreamCallContextCancellationDuringDrain` covers that path.
+
+### Hash-partitioned workers (`internal/worker`)
+
+Each frame is routed to worker `fnv1a(call_id) mod N`. The same call always lands on the same worker, so that worker can keep the call's state in plain maps with no locks:
+
 ```go
-func (r *EventRouter) Publish(callID string, event *pb.CallEvent) {
-    r.mu.RLock()
-    defer r.mu.RUnlock()
+sessions     map[callID]*callSession // next expected sequence, pending frames, timers
+abortedCalls map[callID]time.Time    // tombstones
+```
 
-    if r.closed {
-        return
-    }
+Per-worker queues are channels sized `queueCapacity / workers` (at least 64; the server uses 2048 total, so 512 each at the default 4 workers). If a queue is full, `Submit` blocks, which stops the receive loop, which stops reading from the HTTP/2 stream, which pushes back on the sender through flow control. Overload slows the caller down instead of growing memory.
 
-    for _, ch := range r.subscribers[callID] {
-        select {
-        case ch <- event:
-        default:
-            metrics.DefaultMetrics.IncDropped()
-        }
+One honest caveat on "share-nothing": per-call state is owned by one worker, but event sequence numbers come from a single process-wide atomic counter. They increase within a call, with gaps, because other calls' events take numbers too.
+
+### Reassembling out-of-order frames
+
+A new session expects sequence 1. For each frame:
+- **Already processed** (sequence below the expected one): dropped, counted as a duplicate.
+- **Exactly the expected one**: processed, then any buffered frames that are now contiguous are drained in order.
+- **Ahead of the expected one**: buffered in `pendingChunks`, with two limits:
+  - More than 64 buffered frames per call, or a frame more than 128 ahead of the expected sequence, and the frame is dropped and the caller gets an `EVENT_CALL_ERROR` (`pending_buffer_saturated` or `excessive_sequence_gap`). The call keeps going.
+- **Sequence 0**: treated as unsequenced and processed immediately.
+
+The final frame (`is_final`) goes through the same path, so finalization cannot race ahead of frames that arrive before it. `TestOutOfOrderChunkArrivalSequencing`, `TestInitialSequenceGapReassembly`, `TestDuplicateSequenceDrop` and `TestPendingChunksBufferBounds` cover the cases.
+
+### What happens when a frame never arrives
+
+A gap does not wait forever. When the first out-of-order frame is buffered, the session records a start time. Each worker has a 100 ms ticker, and if a gap stays open for 2 seconds (`DefaultGapTimeout`), the worker:
+1. Emits `EVENT_CALL_ERROR` with `sequence_gap_timeout`,
+2. Deletes the session and its buffered frames,
+3. Records a tombstone for the call.
+
+The stream handler sees that event and ends the RPC with `codes.DataLoss`. `TestGapTimeoutSessionTermination` drives it.
+
+### Tombstones: no zombie calls
+
+If a late or retransmitted frame arrived after the abort and the worker had no memory of the call, it would create a fresh session expecting sequence 1 and start a ghost call. So the worker remembers aborted call IDs for 60 seconds, up to 1,024 per worker, and drops frames for them (counted as `late_frames_tombstone_dropped`). When the table is full the oldest tombstone is evicted so the newest abort is always protected. Because a worker owns its calls, none of this needs a lock. `TestFrameArrivingAfterGapTimeoutAbort` and `TestTombstoneCapacityEviction` cover it. Idle sessions with no activity for 15 minutes are evicted by the same ticker.
+
+### The event router (`internal/router`)
+
+The router is the fan-out hub: `map[callID][]chan *CallEvent` behind a `sync.RWMutex`. The caller's own stream subscribes with a 128-event buffer and each `WatchCall` watcher with 512.
+
+Publish takes the read lock and does a non-blocking send to every subscriber:
+
+```go
+for _, ch := range subs {
+    select {
+    case ch <- event:
+    default:
+        metrics.DefaultMetrics.IncDropped() // slow consumer: drop, never wait
     }
 }
 ```
-Because `unsubscribe()` must acquire `r.mu.Lock()` before removing and closing `ch`, no `Publish()` invocation can attempt to send to a channel currently being closed or already closed.
+
+Unsubscribing takes the write lock before closing the channel, so a `Publish` can never send on a closed channel. `TestSubscriberBufferSaturationBackpressureDrop` fills a watcher's buffer and checks that the stream still completes and the drops are counted. `TestWatchCallFanOut` checks that a watcher sees the same events.
+
+The tradeoff is deliberate and worth stating: the ingest side applies backpressure (workers slow the caller down), while the output side drops (slow subscribers lose events). Real-time voice would rather lose a dashboard update than add latency to the call. The caller's own event channel is also a router subscriber, so it too can drop events if it stops reading.
+
+### Tenants and auth
+
+Authentication is an interceptor on both unary and stream RPCs. It reads the `x-api-key` metadata header and looks the key up in an exact-match map (no prefix matching). Unknown or missing keys get `codes.Unauthenticated`. The standard gRPC health service is exempt.
+
+Keys come from the environment: `STREAMBRIDGE_API_KEY=<key>` maps one key to the tenant `tenant_production`, and `STREAMBRIDGE_API_KEYS="key1:tenantA,key2:tenantB"` maps several. With neither set, every call is rejected. There are no built-in test keys (`TestProductionRegistryStartsEmpty`).
+
+Ownership is bound on the first frame: the call ID is registered to the authenticated tenant. A `tenant_id` in a frame that disagrees with the authenticated tenant is `PermissionDenied`. Another tenant calling `WatchCall` or `GetCallSummary` on that call ID is `PermissionDenied` too (`TestTenantIsolationCrossTenantAccessBlocked`).
+
+### The mock worker pipeline
+
+Per frame, the worker emits a partial transcript (`Speaker audio frame N acknowledged (M bytes)`, or the text after a `text:` prefix). Every third frame it emits a sentiment event (`positive`, or `neutral` when the frame count is also even). On the final frame it emits a final transcript (a canned line, or the text after a `final_text:` prefix), an intent event, `EVENT_CALL_ENDED`, and stores a `CallSummary`. Payloads are strongly typed structs, or pre-built constant strings for the fixed ones, so JSON escaping is correct (`TestSpecialCharactersInTranscriptJSON` pushes quotes, backslashes, newlines and emoji through) and the fixed ones allocate nothing.
+
+`WatchCall` ends when it sees `EVENT_CALL_ENDED` or any `EVENT_CALL_ERROR`.
 
 ---
 
-## Benchmark Results
+## Protocol
 
-All benchmarks executed via in-process `bufconn` listener (Windows amd64, AMD Ryzen 5 3500U, Go 1.23.12, run without `-race`).
+Defined in `proto/streambridge.proto`:
 
-### 1. Sequential Stream Throughput
-```
-pkg: github.com/yoohooshantanu/audio-gateway/tests
-BenchmarkAudioGatewayThroughput-8    4726    233320 ns/op    13952 B/op    227 allocs/op
-```
-* **~233 µs per full end-to-end stream session**, including HTTP/2 bidi stream initialization, 3 audio chunks, ASR/Sentiment/Intent processing, event fan-out, and clean response drain.
+| RPC | Type | Purpose |
+| :--- | :--- | :--- |
+| `StreamCall(stream AudioChunk) returns (stream CallEvent)` | Bidirectional streaming | Send frames, receive events for your call |
+| `WatchCall(WatchRequest) returns (stream CallEvent)` | Server streaming | Observe a live call you are allowed to see |
+| `GetCallSummary(SummaryRequest) returns (CallSummary)` | Unary | Post-call transcript, sentiment, intent, duration, counts |
 
-### 2. Concurrent Out-of-Order Streams Profiling & Optimization
-A high-concurrency benchmark (`BenchmarkConcurrentStreamsWithGaps`) simulates 20 concurrent bidirectional gRPC voice calls delivering scrambled out-of-order audio frames.
+- **`AudioChunk`**: `call_id`, `tenant_id`, `sequence` (starts at 1), `data`, `is_final`, `timestamp`.
+- **`CallEvent`**: `call_id`, `type`, `payload` (JSON string), `sequence`, `timestamp`.
+- **Event types**: `TRANSCRIPT_PARTIAL`, `TRANSCRIPT_FINAL`, `SENTIMENT`, `INTENT_DETECTED`, `CALL_ENDED`, `CALL_ERROR`.
+- **gRPC status codes you can see**: `Unauthenticated` (bad or missing key), `PermissionDenied` (wrong tenant), `InvalidArgument` (empty call ID), `NotFound` (no summary yet), `DataLoss` (sequence gap timeout), `Unavailable` (send failed).
 
-**Profiling Diagnostics (`go tool pprof`)**:
-Profiling CPU and heap allocation profiles revealed two primary contributors:
-1. Dynamic `json.Marshal(map[string]interface{}{...})` calls inside `executeChunk` accounted for 18.0% of CPU runtime and 21.1% of heap allocations due to reflection, dynamic map sorting, and `interface{}` boxing.
-2. In `StreamCall`, allocating a 512-item subscriber channel buffer per stream created ~4 KB of channel pointer storage per call. In the benchmark's high-turnover loop across thousands of calls, this cumulatively accounted for 419 MB of transient allocations.
+---
 
-**Optimizations Applied**:
-1. **Strongly-Typed JSON Structs**: Replaced dynamic `map[string]interface{}` with concrete structs (`PartialTranscriptEvent`, `FinalTranscriptEvent`, `CallErrorEvent`), eliminating map creation and key sorting while guaranteeing RFC 8259-compliant escaping for quotes, backslashes, newlines, and UTF-8 emojis.
-2. **Static Invariant Payload Caching**: Pre-serialized immutable event types (`intentDetectedPayload`, `positiveSentimentPayload`, `neutralSentimentPayload`, `{"status":"completed"}`), incurring 0 heap allocations.
-3. **Right-Sized Channel Buffers**: Reduced per-stream subscriber buffers from 512 to 128 items in `StreamCall`.
+## Run it
 
-> [!NOTE]
-> **Performance Contribution & Backpressure Trade-off**:
-> Both the JSON serialization redesign and the subscriber channel buffer reduction contributed to the overall benchmark gains. Reducing the subscriber channel capacity from 512 to 128 lowers baseline memory consumption per call (~1 KB vs ~4 KB pointer table), but reduces absorption capacity for slow subscribers: lagging downstream watchers will hit non-blocking backpressure drops (`metrics.DefaultMetrics.IncDropped()`) sooner during sustained downstream stalls.
-
-**Exact Benchmark Commands**:
 ```bash
-go test -run='^$' -bench='BenchmarkConcurrentStreamsWithGaps' -benchmem -count=10 ./tests/... > baseline.txt
-go test -run='^$' -bench='BenchmarkConcurrentStreamsWithGaps' -benchmem -count=10 ./tests/... > optimized.txt
-benchstat baseline.txt optimized.txt
+git clone https://github.com/yoohooshantanu/streambridge
+cd streambridge
+export STREAMBRIDGE_API_KEYS="dev_key:tenant_dev"
+go run ./cmd/server
+# gRPC on :50051, HTTP sidecar on 127.0.0.1:8083
 ```
 
-**Statistical Comparison (`benchstat -count=10 baseline.txt optimized.txt`)**:
-```
-goarch: amd64
-pkg: github.com/yoohooshantanu/audio-gateway/tests
-cpu: AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx  
-                            │ baseline.txt │            optimized.txt             │
-                            │    sec/op    │    sec/op     vs base                │
-ConcurrentStreamsWithGaps-8   5.125m ± 18%   4.370m ± 12%  -14.72% (p=0.003 n=10)
+Minimal Go client:
 
-                            │ baseline.txt │            optimized.txt             │
-                            │     B/op     │     B/op      vs base                │
-ConcurrentStreamsWithGaps-8   895.7Ki ± 0%   712.8Ki ± 0%  -20.42% (p=0.000 n=10)
+```go
+conn, _ := grpc.NewClient("127.0.0.1:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
+client := pb.NewAudioGatewayClient(conn)
+ctx := metadata.AppendToOutgoingContext(context.Background(), "x-api-key", "dev_key")
+stream, _ := client.StreamCall(ctx)
 
-                            │ baseline.txt │            optimized.txt            │
-                            │  allocs/op   │  allocs/op   vs base                │
-ConcurrentStreamsWithGaps-8    15.73k ± 0%   12.97k ± 0%  -17.57% (p=0.000 n=10)
+stream.Send(&pb.AudioChunk{CallId: "call-1", Sequence: 1, Data: []byte("text:hello there")})
+stream.Send(&pb.AudioChunk{CallId: "call-1", Sequence: 2, Data: []byte("final_text:hello there, bye"), IsFinal: true})
+stream.CloseSend()
+
+for {
+    ev, err := stream.Recv()
+    if err != nil {
+        break
+    }
+    fmt.Println(ev.Type, ev.Payload)
+}
 ```
-* **Latency**: Reduced from 5.125 ms to 4.370 ms (**-14.72%** faster per operation, $p=0.003$).
-* **Memory Allocated**: Reduced from 895.7 KiB to 712.8 KiB (**-20.42%** less memory per operation, $p=0.000$).
-* **Allocations**: Reduced from 15.73k to 12.97k (**-17.57%** fewer allocations per operation, $p=0.000$).
+
+Send frames out of order, or skip one, to watch the reassembly and the gap timeout.
+
+### Configuration
+
+| Setting | Default | Notes |
+| :--- | :--- | :--- |
+| `GRPC_PORT` | `50051` | gRPC server listening port |
+| `HTTP_PORT` | `8083` | `/healthz`, `/metrics`, pprof |
+| `HTTP_HOST` | `127.0.0.1` | Set to `0.0.0.0` inside a container, or published port is unreachable |
+| `WORKER_POOL_SIZE` or `-workers` | `4` | Flag wins over env |
+| `PPROF_ENABLED` | `off` | `true` or `1` also turns on block and mutex profiling |
+| `STREAMBRIDGE_API_KEY`, `STREAMBRIDGE_API_KEYS` | none | See above. No keys means every call is rejected |
+
+`make build`, `make test`, `make bench`, `make run` and `make docker-build` exist. Shutdown is graceful: gRPC gets 5 seconds to drain active streams, then the pool stops, then the router closes.
 
 ---
 
-## High-Concurrency Load Testing & Saturation Analysis
+## Observability
 
-A dedicated load generator (`cmd/loadgen`) drives realistic multi-stream bidirectional VoIP traffic (20ms PCM audio frames at 50 pps per call) across configurable concurrency steps (50, 100, 200, 400, and 800 concurrent calls) to characterize real-time streaming boundaries, enqueue-to-dequeue scheduling delays, and resource utilization.
+The HTTP sidecar serves Prometheus metrics at `/metrics`:
+`audio_gateway_active_streams`, `audio_gateway_active_watchers`, `audio_gateway_audio_packets_total`, `audio_gateway_audio_bytes_total`, `audio_gateway_events_emitted_total`, `audio_gateway_events_dropped_total`, `audio_gateway_duplicate_frames_dropped_total`, `audio_gateway_late_frames_tombstone_dropped_total`, `audio_gateway_sequence_gap_timeouts_total`, `audio_gateway_worker_queue_depth`, `audio_gateway_packet_queue_wait_seconds`, `audio_gateway_packet_processing_seconds`, `audio_gateway_grpc_requests_total`, `audio_gateway_grpc_request_duration_seconds`.
 
-### Test Environment & Methodology Disclaimers
-* **Hardware**: AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx (4 Physical Cores, 8 Logical Processors), 8 GB RAM.
-* **Operating System**: Windows 11 Home Single Language (64-bit).
-* **Toolchain**: `go version go1.27.0 windows/amd64` (module target: `go 1.23.0`).
-* **Co-Location Disclaimer**: The load generator and the AudioGateway server were co-located on the same physical host and communicated over the local loopback interface (`127.0.0.1`). Both processes directly competed for CPU cores, Go runtime scheduler time slices, and OS network socket buffers. These benchmarks measure local process behavior under contention and make **no claims of production capacity or cloud deployment throughput**.
-* **Generator Self-Check & Timing Precision**: Frame pacing on Windows uses multimedia high-resolution timer interrupt alignment (`timeBeginPeriod(1)`) to avoid default scheduler quantum jitter (with non-Windows fallback stubs). The generator tracks tick arrival lateness relative to scheduled 20ms intervals; ticks delayed >5ms advance schedule without catch-up bursting. A step is marked throttled if late ticks exceed 2% of offered packets.
-* **Run Discipline**: Stream starts are staggered over 1.5 seconds (`-stagger-window=1500ms`), the first 4 seconds of each step are discarded as warmup (`-warmup-duration=4s`), and between steps the generator waits until `audio_gateway_active_streams == 0`. The server binary is restarted cleanly between each of the 3 repeated benchmark runs. Metrics (p50/p95/p99 enqueue-to-dequeue delay and processing latency, memory, goroutines) are extracted directly from the server's Prometheus registry (`/metrics`), not from the client.
+Two are worth knowing about:
+- **Queue wait** (`audio_gateway_packet_queue_wait_seconds`): how long a frame sat in a worker's queue before it was picked up.
+- **Processing** (`audio_gateway_packet_processing_seconds`): how long the worker spent on it.
 
-### Load Test Commands
-```powershell
-# Build binaries
-go build -o bin/audio-gateway.exe ./cmd/server
-go build -o bin/loadgen.exe ./cmd/loadgen
-
-# Execute 3-run automated load test with auto-restart and pprof capture at knee
-.\bin\loadgen.exe -steps="50,100,200,400,800" -step-duration=15s -warmup-duration=4s -stagger-window=1500ms -runs=3 -auto-restart=true -profile-dir=./loadtest_profiles
-```
-
-### Aggregated Results (3 Runs, `[min - max]` Ranges)
-
-| Calls | Target PPS | Achieved PPS | Enqueue-to-Dequeue Delay (p99, includes scheduling delay) | Proc Time (p99) | Mean Svc Time | Implied Util ($\rho$) | Client RTT (p99) | Server CPU% | Host CPU% | Mid Goroutines | Notes |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|
-| **50** | 2,500 | 2,502 - 2,505 | 1.21ms - 1.77ms | 0.82ms - 0.89ms | 18.3µs - 26.7µs | 1.1% - 1.7% | 5.18ms - 8.60ms | 71.4% - 96.4% | 60.5% - 82.3% | 137 - 137 | Linear throughput, sub-2ms delay |
-| **100** | 5,000 | 5,008 - 5,011 | 1.01ms - 7.39ms | 0.83ms - 0.88ms | 19.3µs - 30.3µs | 2.4% - 3.8% | 6.92ms - 79.05ms | 114.6% - 137.1% | 75.1% - 90.5% | 236 - 237 | Linear scaling, stable worker queues |
-| **200** | 10,000 | 9,691 - 9,891 | 8.55ms - 33.98ms | 0.83ms - 0.89ms | 20.9µs - 33.5µs | 5.2% - 8.1% | 56.82ms - 214.60ms | 161.4% - 190.8% | 93.1% - 98.7% | 437 - 437 | **Knee Threshold**: Enqueue-to-dequeue delay crosses 10ms; client RTT rises |
-| **400** | 20,000 | 16,331 - 20,029 | 17.35ms - 231.29ms | 0.67ms - 0.80ms | 19.8µs - 57.7µs | 9.9% - 23.5% | 75.49ms - 1,163.25ms | 150.7% - 300.7% | 99.9% - 100.0% | 837 - 837 | **Host Saturated**: Host CPU hits 100%; scheduler starvation |
-| **800** | 40,000 | 22,202 - 38,570 | 88.10ms - 244.93ms | 0.53ms - 0.63ms | 25.2µs - 52.9µs | 24.3% - 29.4% | 180.15ms - 3,053.17ms | 162.9% - 346.4% | 99.8% - 100.0% | 1,637 - 1,637 | Severe host exhaustion; client timeouts |
-
-*\* Note: Goroutines are sampled directly from `go_goroutines` mid-step during steady-state traffic, reflecting active per-stream read/write routines scaling linearly with concurrency.*
-
-> [!IMPORTANT]
-> **Source of Enqueue-to-Dequeue Delay**:
-> Because implied worker utilization ($\rho = \frac{\text{Throughput} \times S_{\text{mean}}}{\text{numWorkers}}$) was only 5%–27% across all steps, the measured enqueue-to-dequeue delay is **not** caused by compute-heavy worker queue backlogs. Instead, this delay is mostly Go runtime scheduler and CPU starvation on a host whose CPU is 99%+ saturated by gRPC framing, network socket transit, and co-located load generation.
+Together you can distinguish "workers are slow" from "workers are starved". Labels are kept low-cardinality on purpose: `TestCardinalitySafety1000CallsConstantSeriesCount` runs 1,000 calls and checks the number of metric series does not grow with call IDs. Logs are structured and carry `call_id` and `tenant_id` (`TestStructuredLoggingCarriesCallID`). pprof is off unless `PPROF_ENABLED` is set.
 
 ---
 
-### Understanding the Caller Knee vs. Server-Side Knee
+## Tests
 
-#### What Client RTT Measures
-**Client RTT** measures the total round-trip elapsed duration from the exact instant the load generator initiates `stream.Send()` for an audio chunk until receipt of the corresponding acknowledgment `CallEvent` on `stream.Recv()`. This end-to-end span encompasses:
-1. Client-side HTTP/2 frame buffering and gRPC transport scheduling
-2. Operating system network socket write (`WSASend`) and loopback transit
-3. Server-side gRPC ingest, stream demultiplexing, and frame validation
-4. Partitioned worker queue wait (enqueue-to-dequeue delay) in `workerQueues[workerIdx]`
-5. In-worker sequencing, reassembly, and JSON event formatting
-6. Event router fan-out to subscriber channels
-7. Server-side outbound response serialization (`loopyWriter.run` / `WSASend`)
-8. Loopback transit and client-side unmarshaling.
+22 test functions and 4 benchmarks, in `tests/` and `internal/worker/`. CI runs them with `go test -race` on every push. The gRPC tests run over an in-memory `bufconn` listener, so they use no real ports and exercise the full interceptor chain.
 
-#### Divergence at the Knee
-Because Client RTT captures the entire socket and transport pipeline, **a caller perceives the saturation knee significantly earlier than server-side execution metrics indicate**:
-* At **200 concurrent calls**, server-side chunk execution time remains completely flat (<1ms, mean service time ~21µs–34µs), and server worker enqueue-to-dequeue delay is still near 8.5ms–34.0ms. However, client-observed RTT p99 climbs to **56.8ms–214.6ms**, crossing real-time interactive thresholds.
-* At **400 concurrent calls**, host CPU reaches 100% saturation. While worker execution loops continue to process chunks in <1ms once dequeued, client RTT escalates to **75ms–1,163ms** due to socket transport contention and OS thread scheduling delays.
-
----
-
-### Worker Pool Scalability Experiment (4 vs. 8 vs. 16 Workers)
-
-To determine how worker count affects scheduling delay under high load, steps 200 and 400 were evaluated across 4, 8, and 16 worker configurations (3 repeated runs per cell):
-
-| Config | Calls | Offered PPS | Achieved PPS | Enqueue-to-Dequeue Delay (p99) | Mean Svc Time | Implied Util ($\rho$) | Client RTT (p99) | Server CPU% | Host CPU% |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **4 Workers** | 200 | 10,000 | 9,934 - 10,045 | 5.17ms - 8.71ms | 21.7µs - 23.7µs | 5.5% - 5.9% | 32.95ms - 59.31ms | 191.0% - 228.5% | 91.3% - 97.2% |
-| **4 Workers** | 400 | 20,000 | 18,515 - 19,643 | 87.46ms - 158.69ms | 35.0µs - 40.3µs | 16.7% - 19.8% | 254.37ms - 265.05ms | 228.6% - 253.0% | 99.5% - 99.9% |
-| **8 Workers** | 200 | 10,000 | 9,815 - 10,027 | 0.95ms - 12.16ms | 17.3µs - 25.0µs | 4.3% - 6.1% | 11.55ms - 62.98ms | 157.1% - 230.2% | 59.8% - 97.1% |
-| **8 Workers** | 400 | 20,000 | 17,039 - 20,075 | 6.63ms - 242.33ms | 18.4µs - 63.8µs | 9.2% - 27.2% | 42.09ms - 547.76ms | 176.9% - 307.5% | 90.8% - 100.0% |
-| **16 Workers** | 200 | 10,000 | 9,901 - 10,027 | 2.41ms - 16.14ms | 20.4µs - 26.9µs | 5.1% - 6.7% | 35.21ms - 122.77ms | 166.7% - 204.2% | 89.1% - 99.2% |
-| **16 Workers** | 400 | 20,000 | 18,952 - 19,837 | 39.00ms - 47.37ms | 24.9µs - 36.3µs | 12.3% - 17.2% | 153.13ms - 203.38ms | 231.9% - 268.8% | 99.4% - 99.5% |
-
-#### Worker Count Scalability Observations
-1. **Reduced Queue Delay at 400 Calls**: Increasing workers from 4 to 16 reduced p99 enqueue-to-dequeue delay (4 workers: 87.46ms–158.69ms vs 16 workers: 39.00ms–47.37ms, non-overlapping ranges) and lowered client RTT p99 (4 workers: 254ms–265ms vs 16 workers: 153ms–203ms).
-2. **Saturation Persists (Host CPU 99%+)**: Despite the reduction in queue delay, increasing worker count did **not** remove saturation: host CPU remained pegged at 99.4%–99.9%, bounded by gRPC transport and socket scheduling across the 4 physical CPU cores.
-3. **8-Worker Variance**: The 8-worker results exhibited high variance across runs (queue delay 6.63ms–242.33ms; client RTT 42ms–548ms), making them too noisy to rank definitively between 4 and 16.
-4. **Thermal & Power Throttling Variance**: Across repeated test steps on this consumer laptop, dynamic CPU frequency scaling, thermal throttling, and background Windows OS scheduling introduced noticeable run-to-run variance across the 3 runs per cell.
-
----
-
-### Saturation Bottleneck Diagnostics (`pprof`)
-
-Profiling was captured during sustained traffic at the saturation knee (200–400 concurrent calls) with block and mutex profiling enabled (`runtime.SetBlockProfileRate(10000)`, `runtime.SetMutexProfileFraction(5)`):
-
-* **Block Profile (`block_knee_*.pprof`)**: `runtime.selectgo` accounted for 99.31% of blocking time in the profile. This represents **idle waiting by open streams** (specifically, 50.17% in `StreamCall` waiting on downstream event channels or stream disconnect, and 45.19% in gRPC `GenericServerStream.Recv` waiting for network frames to arrive over HTTP/2). It reflects goroutines blocked in legitimate select statements awaiting I/O rather than a lock bottleneck.
-* **Mutex Profile (`mutex_knee_*.pprof`)**: Mutex wait delay is concentrated in gRPC stream serialization (`GenericServerStream.Send` -> `http2Server.Write` / `loopyWriter`), which accounts for ~48.6% of mutex contention time across concurrent streams. In contrast, worker pool submission and dispatch locks account for <6% of mutex wait time.
-* **Conclusion**: These diagnostic observations are **consistent with the system being transport-bound**; host CPU and network transport serialization bound throughput before worker execution loops are saturated.
-
----
-
-### `hashCallID` Microbenchmark & Register Inlining
-
-Partitioning incoming chunks across workers requires hashing the `call_id` string to select `workerQueues[workerIdx]`. Previously, this invoked `hash/fnv` via `hash.Hash32` interface dispatch (which incurred 0 heap allocations, but had interface method call overhead). Replacing this with an inline, unrolled 32-bit FNV-1a calculation (`hashCallIDInline`) keeps state entirely in CPU registers and eliminates interface method dispatch.
-
-#### Microbenchmark Results (`go test -bench="." -benchmem`)
-```
-goos: windows
-goarch: amd64
-pkg: github.com/yoohooshantanu/audio-gateway/internal/worker
-cpu: AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx  
-BenchmarkHashCallID_Old-8      	17404849	        69.36 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHashCallID_Inline-8   	37257129	        34.65 ns/op	       0 B/op	       0 allocs/op
-```
-* **Latency**: Reduced from ~69.4 ns/op to ~34.7 ns/op (~50% faster per chunk submission).
-* **Allocations**: Both implementations incur 0 B/op and 0 allocs/op; the speedup comes entirely from register-only computation and avoiding interface dispatch.
-* **Equivalence Verification**: Bit-for-bit equivalence between `hashCallID` and `fnv.New32a` was verified via `TestHashCallIDEquivalence` over 10,000 randomized call IDs across varying worker counts (1 to 64).
-* **Load Test Impact**: Because `hashCallID` is a micro-optimization on the fast path (~35ns out of ~20µs mean service time), it modestly reduces CPU instructions per chunk but does not alter the macro-level host CPU saturation knee.
-
----
-
-### Benchmarking Limitations & Recommended Testing
-* **Single-Machine Co-Location**: The load generator and server ran on the same physical host and competed directly for CPU cores, thread scheduling, and loopback socket buffers.
-* **Caller-Latency Knee**: On this laptop (AMD Ryzen 5 3500U, 4 physical cores), the caller-perceived latency knee occurs around **100–200 concurrent calls** (~5,000–10,000 pps), well before internal worker processing execution degrades.
-* **Recommended Production Evaluation**: For realistic deployment characterization, rerun the load generator on separate dedicated Linux hosts over high-bandwidth physical networks with explicit CPU and memory container limits (e.g. Kubernetes cgroups / CFS quotas).
-
----
-
-### Raw Histogram Bucket Counts Appendix (Run 1)
-
-<details>
-<summary><b>Click to expand raw cumulative histogram bucket counts per concurrency step</b></summary>
-
-#### Step 1: 50 Concurrent Calls (2,500 offered pps)
-```
-Queue Wait Raw Buckets:
-  le <= 0.0001s  : 25,148
-  le <= 0.0005s  : 25,274
-  le <= 0.0010s  : 26,998
-  le <= 0.0025s  : 27,333
-  le <= 0.0050s  : 27,397
-  le <= 0.0100s  : 27,432
-  le <= 0.0250s  : 27,434
-  le <= +Inf     : 27,434
-
-Processing Raw Buckets:
-  le <= 0.0001s  : 26,426 (96.3% <= 100µs)
-  le <= 0.0005s  : 26,492
-  le <= 0.0010s  : 27,380
-  le <= 0.0025s  : 27,417
-  le <= 0.0100s  : 27,433
-  le <= +Inf     : 27,434
-```
-
-#### Step 2: 100 Concurrent Calls (5,000 offered pps)
-```
-Queue Wait Raw Buckets:
-  le <= 0.0001s  : 51,427
-  le <= 0.0005s  : 51,662
-  le <= 0.0010s  : 54,645
-  le <= 0.0025s  : 54,977
-  le <= 0.0050s  : 55,022
-  le <= 0.0100s  : 55,069
-  le <= 0.0250s  : 55,111
-  le <= +Inf     : 55,111
-
-Processing Raw Buckets:
-  le <= 0.0001s  : 53,036 (96.2% <= 100µs)
-  le <= 0.0005s  : 53,123
-  le <= 0.0010s  : 55,010
-  le <= 0.0025s  : 55,092
-  le <= 0.0100s  : 55,111
-  le <= +Inf     : 55,111
-```
-
-#### Step 3: 200 Concurrent Calls (10,000 offered pps)
-```
-Queue Wait Raw Buckets:
-  le <= 0.0001s  : 102,061
-  le <= 0.0005s  : 102,269
-  le <= 0.0010s  : 105,684
-  le <= 0.0025s  : 107,155
-  le <= 0.0050s  : 107,980
-  le <= 0.0100s  : 108,619
-  le <= 0.0250s  : 109,321
-  le <= 0.0500s  : 109,492
-  le <= +Inf     : 109,522
-
-Processing Raw Buckets:
-  le <= 0.0001s  : 106,518 (97.3% <= 100µs)
-  le <= 0.0005s  : 106,637
-  le <= 0.0010s  : 109,125
-  le <= 0.0025s  : 109,453
-  le <= 0.0100s  : 109,510
-  le <= +Inf     : 109,522
-```
-
-#### Step 4: 400 Concurrent Calls (20,000 offered pps)
-```
-Queue Wait Raw Buckets:
-  le <= 0.0001s  : 169,759
-  le <= 0.0005s  : 170,377
-  le <= 0.0010s  : 175,531
-  le <= 0.0025s  : 184,542
-  le <= 0.0050s  : 191,657
-  le <= 0.0100s  : 200,038
-  le <= 0.0250s  : 210,734
-  le <= 0.0500s  : 214,419
-  le <= 0.1000s  : 215,320
-  le <= 0.2500s  : 215,878
-  le <= +Inf     : 215,878
-
-Processing Raw Buckets:
-  le <= 0.0001s  : 212,228 (98.3% <= 100µs)
-  le <= 0.0005s  : 212,445
-  le <= 0.0010s  : 214,238
-  le <= 0.0025s  : 215,572
-  le <= 0.0100s  : 215,729
-  le <= 0.0500s  : 215,863
-  le <= +Inf     : 215,872
-```
-
-#### Step 5: 800 Concurrent Calls (40,000 offered pps)
-```
-Queue Wait Raw Buckets:
-  le <= 0.0001s  : 191,261
-  le <= 0.0005s  : 192,102
-  le <= 0.0010s  : 203,164
-  le <= 0.0025s  : 224,052
-  le <= 0.0050s  : 244,927
-  le <= 0.0100s  : 273,237
-  le <= 0.0250s  : 313,017
-  le <= 0.0500s  : 342,404
-  le <= 0.1000s  : 364,618
-  le <= 0.2500s  : 375,311
-  le <= 0.5000s  : 376,353
-  le <= +Inf     : 376,353
-
-Processing Raw Buckets:
-  le <= 0.0001s  : 371,090 (98.6% <= 100µs)
-  le <= 0.0005s  : 371,344
-  le <= 0.0010s  : 373,729
-  le <= 0.0025s  : 375,778
-  le <= 0.0100s  : 376,049
-  le <= 0.0500s  : 376,316
-  le <= +Inf     : 376,350
-```
-</details>
-
----
-
-## Getting Started
-
-### Prerequisites
-- Go 1.23+
-- Make (optional)
-- Docker (optional)
-
-### Running Tests Locally
 ```bash
-go test -v -race ./tests/...
+go test -v -race ./tests/... ./internal/...
+go test -bench=BenchmarkAudioGatewayThroughput -benchmem -run='^$' ./tests/...
 ```
 
-### Starting the Server
-```bash
-go run cmd/server/main.go
-```
-The gRPC streaming server listens on `:50051`, and the HTTP metrics/pprof sidecar listens on `:8083`.
+| Area | Tests |
+| :--- | :--- |
+| **Auth and keys** | `TestAuthInterceptorRejections`, `TestProductionRegistryStartsEmpty` |
+| **Streaming** | `TestBidirectionalStreamCall`, `TestStreamCallContextCancellationDuringDrain`, `TestStreamCallEmptyCallIDRejection` |
+| **Tenants** | `TestTenantIsolationCrossTenantAccessBlocked` |
+| **Reassembly and gaps** | `TestOutOfOrderChunkArrivalSequencing`, `TestInitialSequenceGapReassembly`, `TestDuplicateSequenceDrop`, `TestPendingChunksBufferBounds`, `TestGapTimeoutSessionTermination` |
+| **Tombstones** | `TestFrameArrivingAfterGapTimeoutAbort`, `TestTombstoneCapacityEviction` |
+| **Fan-out and backpressure** | `TestWatchCallFanOut`, `TestSubscriberBufferSaturationBackpressureDrop` |
+| **Observability** | `TestPrometheusOfficialMetricsRegistered`, `TestActiveStreamsGaugeDecrementedOnAllExitPaths`, `TestStructuredLoggingCarriesCallID`, `TestCardinalitySafety1000CallsConstantSeriesCount`, `TestSubMillisecondPacketLatencyHistograms` |
+| **Payloads and hashing** | `TestSpecialCharactersInTranscriptJSON`, `TestHashCallIDEquivalence` |
+
+Not covered by tests: shutdown under load, the `WatchCall` termination rules, and many concurrent calls hitting the same worker.
 
 ---
 
-## License
-MIT License. Created by Shantanu Juvekar (`santanujuvekar@gmail.com`).
+## Performance
+
+All numbers below are from one Windows laptop (AMD Ryzen 5 3500U, 4 cores, 8 GB) with the load generator and the server on the same machine over loopback, so they fight for the same CPU. Treat them as "how the design behaves under contention", not as capacity. The raw run output is not committed in this repo, so rerun the commands to reproduce.
+
+### A profile-driven cleanup
+
+Profiling the concurrent out-of-order benchmark (20 simultaneous calls with scrambled frames) showed two costs: dynamic `json.Marshal(map[string]interface{}{...})` per event, and a 512-slot channel allocated for every stream. The fixes were typed payload structs, pre-built constant payloads for fixed events, and a 128-slot stream buffer. `benchstat` over 10 runs each:
+
+| Metric | Before | After | Change |
+| :--- | :--- | :--- | :--- |
+| **Time per op** | 5.125 ms | 4.370 ms | **-14.7%** |
+| **Bytes per op** | 895.7 KiB | 712.8 KiB | **-20.4%** |
+| **Allocations per op** | 15.73k | 12.97k | **-17.6%** |
+
+The buffer and JSON changes were made together, so the gain cannot be split between them. The smaller buffer also means a slow subscriber starts dropping events sooner.
+
+A smaller one: replacing the `hash/fnv` interface calls with an inlined FNV-1a loop took the call-ID hash from about 69 ns to about 35 ns. `TestHashCallIDEquivalence` checks it matches `fnv.New32a` over 10,000 random IDs. At roughly 20 µs of service time per frame this barely registers.
+
+### Load test
+
+`cmd/loadgen` simulates calls sending 20 ms frames (50 per second each), ramping through concurrency steps, three runs per step, with warmup discarded and the server restarted between runs. Server-side numbers come from the server's own Prometheus metrics, not from the client.
+
+```bash
+go build -o bin/audio-gateway ./cmd/server
+go build -o bin/loadgen ./cmd/loadgen
+./bin/loadgen -steps="50,100,200,400,800" -step-duration=15s -runs=3 -auto-restart=true \
+  -server-bin=./bin/audio-gateway -api-key=sb_loadtest_key
+```
+
+*(The server must know the key: `STREAMBRIDGE_API_KEYS="sb_loadtest_key:tenant_load"`.)*
+
+| Concurrent calls | Offered pps | Achieved pps (3 runs) | Queue wait p99 | Client round trip p99 | Host CPU |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **50** | 2,500 | 2,502 to 2,505 | 1.2 to 1.8 ms | 5 to 9 ms | 60 to 82% |
+| **100** | 5,000 | 5,008 to 5,011 | 1.0 to 7.4 ms | 7 to 79 ms | 75 to 91% |
+| **200** | 10,000 | 9,691 to 9,891 | 8.6 to 34 ms | 57 to 215 ms | 93 to 99% |
+| **400** | 20,000 | 16,331 to 20,029 | 17 to 231 ms | 75 to 1,163 ms | 100% |
+| **800** | 40,000 | 22,202 to 38,570 | 88 to 245 ms | 180 to 3,053 ms | 100% |
+
+What it says: the time a worker actually spends on a frame stays under 1 ms and the workers are only 1 to 29% busy at every step, yet delays grow. The profile points the same way: mutex time sits mostly in gRPC's own stream write path (about 49%), and worker dispatch locks account for under 6%. The bottleneck on this machine is gRPC transport plus a CPU shared with the load generator, not the worker design. A caller sees the knee earlier than the server does: at 200 calls the server-side numbers are still small, but client round trips already cross 50 ms.
+
+Raising workers from 4 to 16 at 400 calls cut p99 queue wait (87 to 159 ms down to 39 to 47 ms), but the host stayed pegged at 99% CPU. The 8-worker runs were too noisy to rank.
+
+---
+
+## Limitations and rough edges
+
+1. **No real AI, no real audio**: See the table above.
+2. **State is in memory**: Summaries (capped at 10,000, with arbitrary eviction when exceeded) and tenant ownership are lost on restart. Call-to-tenant entries are never cleaned up, so a long-running process slowly accumulates them.
+3. **No TLS on the gRPC listener**, and API keys are static and compared as ordinary strings.
+4. **The sequence-gap stream termination** is detected by searching the error event's payload text for `sequence_gap_timeout`. It works, but it is fragile compared with a typed signal.
+5. **The `.proto` cannot be compiled by protoc**: Its package name is `audio-gateway.v1`, and a hyphen is not a legal identifier. The Go stubs were produced by a small custom generator (`tools/gen.go`) instead. Clients in other languages cannot generate stubs from this file until the package is renamed (for example `audiogateway.v1`) and regenerated. There is no gRPC reflection either.
+6. **Docker Compose needs work**: The compose file passes no API key, so every call would be rejected. It does not set `HTTP_HOST=0.0.0.0`, so the published metrics port does not answer from outside the container. Its health check runs `/audio-gateway -healthcheck`, a flag the binary does not define. `go run` with the environment variables above works.
+7. **Load test caveats**: Single machine, generator and server competing for CPU, a laptop that throttles, and no committed raw output.
+
+---
+
+## Repo map
+
+| Path | Description |
+| :--- | :--- |
+| `cmd/server/` | Server wiring, config, graceful shutdown, HTTP sidecar |
+| `cmd/loadgen/` | Load generator with paced frames, pprof capture, server restarts |
+| `internal/server/` | `StreamCall`, `WatchCall`, `GetCallSummary` handlers |
+| `internal/worker/` | Hash-partitioned pool, reassembly, gap timeout, tombstones, mock engines |
+| `internal/router/` | Fan-out hub, tenant ownership, summaries, backpressure drops |
+| `internal/interceptor/` | Auth (`x-api-key` to tenant) and logging interceptors |
+| `internal/metrics/` | Prometheus metrics |
+| `internal/health/` | Standard gRPC health service |
+| `internal/pb/` | Generated message and service code |
+| `proto/` | Service definition |
+| `tools/gen.go` | Custom descriptor-based stub generator |
+| `tests/` | Integration tests over in-memory gRPC, plus benchmarks |
+
+---
+
+## Author
+
+Shantanu Juvekar, [@yoohooshantanu](https://github.com/yoohooshantanu).
